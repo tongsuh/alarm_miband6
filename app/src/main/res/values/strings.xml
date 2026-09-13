@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">FlashAlarm</string>
+    <string name="sleep_guard_title">FlashAlarm 睡眠守护进行中</string>
+    <string name="sleep_guard_desc">实时监测手环体动与心率，捕捉做梦黄金期</string>
+    <string name="channel_name">睡眠守护通知</string>
+    <string name="channel_desc">用于保持后台常驻 BLE 连接与实时分期监测</string>
+</resources>
