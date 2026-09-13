@@ -18,9 +18,7 @@ sealed class AuthResult {
 class HuamiAuthHandler(
     private var authKeyBytes: ByteArray = ByteArray(16)
 ) {
-    companion object {
-        private const val TAG = "HuamiAuthHandler"
-    }
+
 
     enum class Step {
         IDLE,
@@ -169,6 +167,8 @@ class HuamiAuthHandler(
     }
 
     companion object {
+        private const val TAG = "HuamiAuthHandler"
+
         fun encryptAes128(input: ByteArray, key: ByteArray): ByteArray? {
             return try {
                 val secretKey = SecretKeySpec(key, "AES")
