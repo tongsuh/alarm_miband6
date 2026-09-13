@@ -1,4 +1,4 @@
-﻿/*  Copyright (C) 2022-2024 Andreas Shimokawa
+/*  Copyright (C) 2022-2024 Andreas Shimokawa
 
     This file is part of Gadgetbridge.
 
