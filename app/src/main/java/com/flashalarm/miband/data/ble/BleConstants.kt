@@ -27,13 +27,29 @@ object BleConstants {
     // Auth Protocol Commands & Opcodes
     const val AUTH_BYTE_MODE_STANDARD: Byte = 0x08                 // Gadgetbridge / Notify / Mi Band standard AES-128 flag
     const val AUTH_BYTE_MODE_ALT: Byte = 0x00                      // Alternative mode flag for certain firmware variants
+    const val AUTH_CRYPT_FLAG: Byte = 0x80.toByte()                // Huami Gen 4/5/6 crypt flag (Gadgetbridge MiBand4Support/InitOperation)
 
+    // Modern Mi Band 4/5/6 Challenge Request: [0x82, 0x08, 0x02, 0x01, 0x00] (5 bytes)
+    val AUTH_CMD_REQUEST_RANDOM_MODERN = byteArrayOf(
+        (0x02 or 0x80).toByte(), // 0x82
+        AUTH_BYTE_MODE_STANDARD, // 0x08
+        0x02,
+        0x01,
+        0x00
+    )
+
+    // Legacy Mi Band 2/3 Challenge Request: [0x02, 0x08]
     val AUTH_CMD_REQUEST_RANDOM = byteArrayOf(0x02, AUTH_BYTE_MODE_STANDARD)
     val AUTH_CMD_REQUEST_RANDOM_ALT = byteArrayOf(0x02, AUTH_BYTE_MODE_ALT)
     const val AUTH_BYTE_RESPONSE_PREFIX: Byte = 0x10
     const val AUTH_BYTE_PAIR_OP: Byte = 0x01
     const val AUTH_BYTE_RANDOM_KEY_OP: Byte = 0x02
     const val AUTH_BYTE_ENCRYPTED_KEY_OP: Byte = 0x03
+
+    // Opcodes with 0x80 crypt flag (used for Mi Band 4, 5, 6)
+    val AUTH_BYTE_RANDOM_KEY_OP_CRYPT: Byte = (0x02 or 0x80).toByte()     // 0x82
+    val AUTH_BYTE_ENCRYPTED_KEY_OP_CRYPT: Byte = (0x03 or 0x80).toByte() // 0x83
+
     const val AUTH_BYTE_SUCCESS: Byte = 0x01
     const val AUTH_BYTE_FAIL_NOT_PAIRED: Byte = 0x04
     const val AUTH_BYTE_FAIL_INVALID_KEY: Byte = 0x06

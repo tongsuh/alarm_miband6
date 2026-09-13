@@ -387,11 +387,11 @@ class MiBandBleManager(
                     delay(150L)
                     val requestPacket = authHandler.startHandshake()
                     Log.i(TAG, "Writing request random challenge packet: ${requestPacket.joinToString(separator = " ") { "%02X".format(it) }}")
-                    _authStatusDetail.value = "安全通道就绪，已发送0x02请求，等待手环Challenge..."
+                    _authStatusDetail.value = "安全通道就绪，已发送Challenge请求，等待手环响应..."
                     val writeSuccess = writeCharacteristic(BleConstants.UUID_SERVICE_AUTH, BleConstants.UUID_CHAR_AUTH, requestPacket)
                     if (!writeSuccess) {
                         Log.e(TAG, "Failed sending random challenge request packet")
-                        _authStatusDetail.value = "发送0x02随机数请求失败，请重试"
+                        _authStatusDetail.value = "发送随机数请求失败，请重试"
                         _connectionState.value = BleConnectionState.ERROR
                     }
                 }
@@ -435,12 +435,14 @@ class MiBandBleManager(
                 when (val result = authHandler.handleAuthNotification(value)) {
                     is AuthResult.SendPacket -> {
                         val packetHex = result.data.joinToString(separator = " ") { "%02X".format(it) }
-                        if (result.data.isNotEmpty() && result.data[0] == BleConstants.AUTH_BYTE_PAIR_OP) {
+                        val opByte = result.data.getOrElse(0) { 0 }
+                        val maskedOp = opByte.toInt() and 0x0F
+                        if (maskedOp == BleConstants.AUTH_BYTE_PAIR_OP.toInt()) {
                             _authStatusDetail.value = "手环提示：请轻触手环屏幕确认配对..."
-                        } else if (result.data.isNotEmpty() && result.data[0] == BleConstants.AUTH_BYTE_RANDOM_KEY_OP) {
-                            _authStatusDetail.value = "正在请求手环挑战码 (模式: 0x%02X)...".format(result.data.getOrElse(1) { 0 })
+                        } else if (maskedOp == BleConstants.AUTH_BYTE_RANDOM_KEY_OP.toInt()) {
+                            _authStatusDetail.value = "正在请求手环挑战码 (Op: 0x%02X)...".format(opByte)
                         } else {
-                            _authStatusDetail.value = "已获取Challenge，正在进行AES运算并回传密文..."
+                            _authStatusDetail.value = "已获取Challenge，正在回传AES密文 (Op: 0x%02X)...".format(opByte)
                         }
 
                         scope.launch(Dispatchers.IO) {

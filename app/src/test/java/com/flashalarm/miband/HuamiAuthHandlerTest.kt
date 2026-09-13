@@ -35,16 +35,35 @@ class HuamiAuthHandlerTest {
     @Test
     fun `test start handshake packet`() {
         val packet = authHandler.startHandshake()
-        assertArrayEquals(BleConstants.AUTH_CMD_REQUEST_RANDOM, packet)
+        assertArrayEquals(BleConstants.AUTH_CMD_REQUEST_RANDOM_MODERN, packet)
+        assertEquals(5, packet.size)
+        assertEquals((0x02 or 0x80).toByte(), packet[0])
         assertEquals(HuamiAuthHandler.Step.WAITING_CHALLENGE, authHandler.currentStep)
     }
 
     @Test
-    fun `test handle random challenge notification produces encrypted response packet`() {
+    fun `test handle random challenge notification produces encrypted response packet with 0x83 opcode`() {
         authHandler.startHandshake()
 
-        // Mock notification from Mi Band 6:
-        // [0x10, 0x02, 0x01, ... 16 bytes challenge ...]
+        // Mock notification from Mi Band 6 (OpCode 0x82 or 0x02):
+        // [0x10, 0x82, 0x01, ... 16 bytes challenge ...]
+        val mockChallenge = ByteArray(16) { (it + 1).toByte() }
+        val mockNotification = byteArrayOf(0x10, (0x02 or 0x80).toByte(), 0x01) + mockChallenge
+
+        val result = authHandler.handleAuthNotification(mockNotification)
+        assertTrue("Result should be SendPacket", result is AuthResult.SendPacket)
+
+        val sendPacket = (result as AuthResult.SendPacket).data
+        assertEquals(18, sendPacket.size)
+        assertEquals((0x03 or 0x80).toByte(), sendPacket[0]) // 0x83
+        assertEquals(0x08.toByte(), sendPacket[1])
+        assertEquals(HuamiAuthHandler.Step.WAITING_CONFIRMATION, authHandler.currentStep)
+    }
+
+    @Test
+    fun `test handle legacy random challenge notification with 0x02 opcode also works`() {
+        authHandler.startHandshake()
+
         val mockChallenge = ByteArray(16) { (it + 1).toByte() }
         val mockNotification = byteArrayOf(0x10, 0x02, 0x01) + mockChallenge
 
@@ -53,28 +72,39 @@ class HuamiAuthHandlerTest {
 
         val sendPacket = (result as AuthResult.SendPacket).data
         assertEquals(18, sendPacket.size)
-        assertEquals(0x03.toByte(), sendPacket[0])
+        assertEquals((0x03 or 0x80).toByte(), sendPacket[0]) // 0x83
         assertEquals(0x08.toByte(), sendPacket[1])
-        assertEquals(HuamiAuthHandler.Step.WAITING_CONFIRMATION, authHandler.currentStep)
     }
 
     @Test
-    fun `test status 7 auto-fallback switches mode`() {
-        authHandler.startHandshake(useAltMode = false)
-        assertEquals(0x08.toByte(), authHandler.currentModeFlag)
+    fun `test status 7 auto-fallback switches from modern to legacy mode`() {
+        authHandler.startHandshake()
+        assertEquals(HuamiAuthHandler.AuthProtocolMode.MODERN_CRYPT_08, authHandler.currentProtocolMode)
 
-        // Band responds with status 7 on 0x03 (invalid flag)
-        val status7Notification = byteArrayOf(0x10, 0x03, 0x07)
+        // Band responds with status 7 on 0x83 (invalid flag)
+        val status7Notification = byteArrayOf(0x10, (0x03 or 0x80).toByte(), 0x07)
         val result = authHandler.handleAuthNotification(status7Notification)
 
-        assertTrue("Result should trigger new handshake packet with alt mode", result is AuthResult.SendPacket)
-        assertEquals(0x00.toByte(), authHandler.currentModeFlag)
+        assertTrue("Result should trigger new handshake packet with fallback mode", result is AuthResult.SendPacket)
+        assertEquals(HuamiAuthHandler.AuthProtocolMode.LEGACY_08, authHandler.currentProtocolMode)
+        assertArrayEquals(BleConstants.AUTH_CMD_REQUEST_RANDOM, (result as AuthResult.SendPacket).data)
     }
 
     @Test
-    fun `test handle auth success confirmation`() {
+    fun `test handle auth success confirmation with 0x83 opcode`() {
         authHandler.startHandshake()
-        // Band sends success confirmation: [0x10, 0x03, 0x01]
+        // Band sends modern success confirmation: [0x10, 0x83, 0x01]
+        val successNotification = byteArrayOf(0x10, (0x03 or 0x80).toByte(), 0x01)
+        val result = authHandler.handleAuthNotification(successNotification)
+
+        assertEquals(AuthResult.Success, result)
+        assertEquals(HuamiAuthHandler.Step.AUTHENTICATED, authHandler.currentStep)
+    }
+
+    @Test
+    fun `test handle auth success confirmation with legacy 0x03 opcode`() {
+        authHandler.startHandshake()
+        // Band sends legacy success confirmation: [0x10, 0x03, 0x01]
         val successNotification = byteArrayOf(0x10, 0x03, 0x01)
         val result = authHandler.handleAuthNotification(successNotification)
 

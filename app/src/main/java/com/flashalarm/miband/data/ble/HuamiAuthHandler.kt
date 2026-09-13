@@ -29,11 +29,23 @@ class HuamiAuthHandler(
         FAILED
     }
 
+    enum class AuthProtocolMode {
+        MODERN_CRYPT_08,  // [0x82, 0x08, 0x02, 0x01, 0x00] -> [0x83, 0x08] + AES (Gadgetbridge / Amazfish Mi Band 4/5/6 standard)
+        LEGACY_08,        // [0x02, 0x08] -> [0x03, 0x08] + AES (Legacy Mi Band 2/3)
+        LEGACY_00         // [0x02, 0x00] -> [0x03, 0x00] + AES (Legacy Alternative)
+    }
+
     var currentStep: Step = Step.IDLE
         private set
 
-    var currentModeFlag: Byte = BleConstants.AUTH_BYTE_MODE_STANDARD
+    var currentProtocolMode: AuthProtocolMode = AuthProtocolMode.MODERN_CRYPT_08
         private set
+
+    val currentModeFlag: Byte
+        get() = when (currentProtocolMode) {
+            AuthProtocolMode.MODERN_CRYPT_08, AuthProtocolMode.LEGACY_08 -> BleConstants.AUTH_BYTE_MODE_STANDARD
+            AuthProtocolMode.LEGACY_00 -> BleConstants.AUTH_BYTE_MODE_ALT
+        }
 
     fun setAuthKeyHex(hexKey: String): Boolean {
         var cleanKey = hexKey.trim()
@@ -62,22 +74,39 @@ class HuamiAuthHandler(
         }
     }
 
-    fun startHandshake(useAltMode: Boolean = false, legacy: Boolean = false): ByteArray {
+    fun startHandshake(mode: AuthProtocolMode = AuthProtocolMode.MODERN_CRYPT_08): ByteArray {
         currentStep = Step.WAITING_CHALLENGE
-        currentModeFlag = if (useAltMode) BleConstants.AUTH_BYTE_MODE_ALT else BleConstants.AUTH_BYTE_MODE_STANDARD
-        Log.i(TAG, "Starting auth handshake with mode flag 0x%02X".format(currentModeFlag))
-        return byteArrayOf(BleConstants.AUTH_BYTE_RANDOM_KEY_OP, currentModeFlag)
+        currentProtocolMode = mode
+        Log.i(TAG, "Starting auth handshake with protocol mode: $currentProtocolMode")
+        return when (mode) {
+            AuthProtocolMode.MODERN_CRYPT_08 -> BleConstants.AUTH_CMD_REQUEST_RANDOM_MODERN
+            AuthProtocolMode.LEGACY_08 -> BleConstants.AUTH_CMD_REQUEST_RANDOM
+            AuthProtocolMode.LEGACY_00 -> BleConstants.AUTH_CMD_REQUEST_RANDOM_ALT
+        }
     }
 
-    fun startPairing(useAltMode: Boolean = false, legacy: Boolean = false): ByteArray {
+    fun startHandshake(useAltMode: Boolean, legacy: Boolean = false): ByteArray {
+        val mode = when {
+            legacy && useAltMode -> AuthProtocolMode.LEGACY_00
+            legacy -> AuthProtocolMode.LEGACY_08
+            useAltMode -> AuthProtocolMode.LEGACY_00
+            else -> AuthProtocolMode.MODERN_CRYPT_08
+        }
+        return startHandshake(mode)
+    }
+
+    fun startPairing(): ByteArray {
         currentStep = Step.WAITING_PAIR_CONFIRM
-        currentModeFlag = if (useAltMode) BleConstants.AUTH_BYTE_MODE_ALT else BleConstants.AUTH_BYTE_MODE_STANDARD
         Log.i(TAG, "Sending pairing key to band with flag 0x%02X".format(currentModeFlag))
         val packet = ByteArray(18)
         packet[0] = BleConstants.AUTH_BYTE_PAIR_OP
         packet[1] = currentModeFlag
         System.arraycopy(authKeyBytes, 0, packet, 2, 16)
         return packet
+    }
+
+    fun startPairing(useAltMode: Boolean, legacy: Boolean = false): ByteArray {
+        return startPairing()
     }
 
     fun handleAuthNotification(value: ByteArray?): AuthResult {
@@ -87,37 +116,38 @@ class HuamiAuthHandler(
         }
 
         val hexStr = value.joinToString(separator = " ") { "%02X".format(it) }
-        Log.i(TAG, "handleAuthNotification: [$hexStr], currentStep=$currentStep")
+        Log.i(TAG, "handleAuthNotification: [$hexStr], currentStep=$currentStep, mode=$currentProtocolMode")
 
         if (value.size < 3 || value[0] != BleConstants.AUTH_BYTE_RESPONSE_PREFIX) {
             currentStep = Step.FAILED
             return AuthResult.Failed("手环返回报文非标准Auth响应: [$hexStr]")
         }
 
-        val opCode = value[1]
+        val rawOpCode = value[1]
+        val maskedOpCode = (rawOpCode.toInt() and 0x0F).toByte()
         val status = value[2]
 
-        when (opCode) {
+        when (maskedOpCode) {
             BleConstants.AUTH_BYTE_PAIR_OP -> { // 0x01
                 if (status == BleConstants.AUTH_BYTE_SUCCESS) {
                     Log.i(TAG, "User tapped screen! Pairing accepted. Proceeding to random challenge...")
-                    currentStep = Step.WAITING_CHALLENGE
-                    return AuthResult.SendPacket(byteArrayOf(BleConstants.AUTH_BYTE_RANDOM_KEY_OP, currentModeFlag))
+                    return AuthResult.SendPacket(startHandshake(currentProtocolMode))
                 } else {
                     currentStep = Step.FAILED
                     return AuthResult.Failed("手环屏幕配对未确认或被取消 (状态码: $status)")
                 }
             }
 
-            BleConstants.AUTH_BYTE_RANDOM_KEY_OP -> { // 0x02
+            BleConstants.AUTH_BYTE_RANDOM_KEY_OP -> { // 0x02 (matches both 0x02 and 0x82)
                 if (status == BleConstants.AUTH_BYTE_FAIL_NOT_PAIRED || status == BleConstants.AUTH_BYTE_FAIL_INVALID_KEY) {
                     Log.w(TAG, "Band returned not paired status $status. Triggering pairing key registration...")
-                    return AuthResult.SendPacket(startPairing(currentModeFlag == BleConstants.AUTH_BYTE_MODE_ALT))
+                    return AuthResult.SendPacket(startPairing())
                 }
 
-                if (status == BleConstants.AUTH_BYTE_FAIL_INVALID_FLAG && currentModeFlag == BleConstants.AUTH_BYTE_MODE_STANDARD) {
-                    Log.w(TAG, "Band returned status 7 on mode 0x08, auto-retrying with alt mode 0x00...")
-                    return AuthResult.SendPacket(startHandshake(useAltMode = true))
+                // If modern mode fails with invalid flag 0x07 on challenge request, try legacy mode
+                if (status == BleConstants.AUTH_BYTE_FAIL_INVALID_FLAG && currentProtocolMode == AuthProtocolMode.MODERN_CRYPT_08) {
+                    Log.w(TAG, "Band returned status 7 on modern 0x82 challenge request, falling back to legacy 0x02...")
+                    return AuthResult.SendPacket(startHandshake(AuthProtocolMode.LEGACY_08))
                 }
 
                 if (status != BleConstants.AUTH_BYTE_SUCCESS) {
@@ -142,18 +172,25 @@ class HuamiAuthHandler(
                         return AuthResult.Failed("AES-128加密运算失败")
                     }
 
-                // Send response packet: [0x03, currentModeFlag] + encrypted 16 bytes (Gadgetbridge standard: [0x03, 0x08] + cipher)
+                // Prepare response packet:
+                // If modern crypt mode: [0x83, 0x08] + encrypted (Gadgetbridge / Amazfish standard for Mi Band 4/5/6)
+                // If legacy mode: [0x03, currentModeFlag] + encrypted
                 val responsePacket = ByteArray(18)
-                responsePacket[0] = BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP
+                responsePacket[0] = if (currentProtocolMode == AuthProtocolMode.MODERN_CRYPT_08) {
+                    BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP_CRYPT // 0x83
+                } else {
+                    BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP // 0x03
+                }
                 responsePacket[1] = currentModeFlag
                 System.arraycopy(encrypted, 0, responsePacket, 2, 16)
 
                 currentStep = Step.WAITING_CONFIRMATION
-                Log.i(TAG, "Sending encrypted challenge response [18 bytes] with mode 0x%02X".format(currentModeFlag))
+                Log.i(TAG, "Sending encrypted challenge response [18 bytes] with opcode 0x%02X, modeFlag 0x%02X"
+                    .format(responsePacket[0], responsePacket[1]))
                 return AuthResult.SendPacket(responsePacket)
             }
 
-            BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP -> { // 0x03
+            BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP -> { // 0x03 (matches both 0x03 and 0x83)
                 return when (status) {
                     BleConstants.AUTH_BYTE_SUCCESS -> {
                         currentStep = Step.AUTHENTICATED
@@ -161,17 +198,21 @@ class HuamiAuthHandler(
                         AuthResult.Success
                     }
                     BleConstants.AUTH_BYTE_FAIL_INVALID_FLAG -> {
-                        if (currentModeFlag == BleConstants.AUTH_BYTE_MODE_STANDARD) {
-                            Log.w(TAG, "Status 7 on mode 0x08, auto-retrying with alt mode 0x00...")
-                            AuthResult.SendPacket(startHandshake(useAltMode = true))
+                        // If modern mode returned status 7, fall back to legacy mode
+                        if (currentProtocolMode == AuthProtocolMode.MODERN_CRYPT_08) {
+                            Log.w(TAG, "Status 7 on modern mode 0x83, falling back to legacy 0x03 mode...")
+                            AuthResult.SendPacket(startHandshake(AuthProtocolMode.LEGACY_08))
+                        } else if (currentProtocolMode == AuthProtocolMode.LEGACY_08) {
+                            Log.w(TAG, "Status 7 on legacy 0x08 mode, falling back to legacy 0x00 mode...")
+                            AuthResult.SendPacket(startHandshake(AuthProtocolMode.LEGACY_00))
                         } else {
                             currentStep = Step.FAILED
-                            AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status，指令标志不受支持)")
+                            AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status，指令格式不受支持)")
                         }
                     }
                     BleConstants.AUTH_BYTE_FAIL_NOT_PAIRED -> {
                         currentStep = Step.FAILED
-                        AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status，密钥不匹配)。请核验AuthKey是否正确！")
+                        AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: 4，密钥不匹配)。请核验AuthKey是否对应此手环！")
                     }
                     else -> {
                         currentStep = Step.FAILED
@@ -181,8 +222,8 @@ class HuamiAuthHandler(
             }
 
             else -> {
-                Log.w(TAG, "Unhandled auth opCode: $opCode")
-                return AuthResult.Failed("未知认证OpCode: $opCode")
+                Log.w(TAG, "Unhandled auth opCode: raw=0x%02X, masked=0x%02X".format(rawOpCode, maskedOpCode))
+                return AuthResult.Failed("未知认证OpCode: 0x%02X".format(rawOpCode))
             }
         }
     }
