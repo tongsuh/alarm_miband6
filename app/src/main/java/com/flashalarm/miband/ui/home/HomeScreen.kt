@@ -27,6 +27,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -91,9 +92,10 @@ fun HomeScreen(
     val isServiceRunning by SleepGuardService.isServiceRunning.collectAsState()
 
     var showPairingDialog by remember { mutableStateOf(false) }
-    var showVibrationStudio by remember { mutableStateOf(false) }
-    var showSensorDiagnostics by remember { mutableStateOf(false) }
+    var showUnifiedSettings by remember { mutableStateOf(false) }
+    var showNotConnectedWarning by remember { mutableStateOf(false) }
     var isTestingAudio by remember { mutableStateOf(false) }
+    val use2021Protocol by prefs.use2021Protocol.collectAsState()
 
     // Audio file picker launcher (copies file to app private sandbox immediately)
     val audioPickerLauncher = rememberLauncherForActivityResult(
@@ -149,42 +151,22 @@ fun HomeScreen(
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // Sensor Diagnostics button
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(DarkSurfaceElevated)
-                            .border(1.dp, DarkBorder, CircleShape)
-                            .clickable { showSensorDiagnostics = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_heart),
-                            contentDescription = "Sensor Diagnostics",
-                            tint = HeartRateRed,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
-
-                    // BLE Pairing settings button
-                    Box(
-                        modifier = Modifier
-                            .size(42.dp)
-                            .clip(CircleShape)
-                            .background(DarkSurfaceElevated)
-                            .border(1.dp, DarkBorder, CircleShape)
-                            .clickable { showPairingDialog = true },
-                        contentAlignment = Alignment.Center
-                    ) {
-                        Icon(
-                            painter = painterResource(id = R.drawable.ic_settings),
-                            contentDescription = "Device Settings",
-                            tint = DarkTextSecondary,
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                // Unified Settings button (Heart rate, Actigraphy, Vibration studio, Sound & 2021 Protocol)
+                Box(
+                    modifier = Modifier
+                        .size(42.dp)
+                        .clip(CircleShape)
+                        .background(DarkSurfaceElevated)
+                        .border(1.dp, DarkBorder, CircleShape)
+                        .clickable { showUnifiedSettings = true },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_settings),
+                        contentDescription = "System & Peripheral Settings",
+                        tint = DarkTextSecondary,
+                        modifier = Modifier.size(20.dp)
+                    )
                 }
             }
 
@@ -220,7 +202,7 @@ fun HomeScreen(
                     prefs.updateCueConfig(updated)
                     app.remEngine.updateConfig(updated)
                 },
-                onOpenVibrationStudio = { showVibrationStudio = true },
+                onOpenVibrationStudio = { showUnifiedSettings = true },
                 onPickAudioFile = { audioPickerLauncher.launch("audio/*") },
                 onToggleAudioTest = {
                     if (isTestingAudio) {
@@ -269,15 +251,25 @@ fun HomeScreen(
                     if (isServiceRunning) {
                         context.startActivity(Intent(context, SleepModeActivity::class.java))
                     } else {
-                        val serviceIntent = Intent(context, SleepGuardService::class.java).apply {
-                            action = SleepGuardService.ACTION_START_GUARD
+                        // Safe check: band MUST be connected before starting sleep guard
+                        if (connectionState != BleConnectionState.CONNECTED) {
+                            showNotConnectedWarning = true
+                            return@Button
                         }
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                            context.startForegroundService(serviceIntent)
-                        } else {
-                            context.startService(serviceIntent)
+                        try {
+                            val serviceIntent = Intent(context, SleepGuardService::class.java).apply {
+                                action = SleepGuardService.ACTION_START_GUARD
+                            }
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                context.startForegroundService(serviceIntent)
+                            } else {
+                                context.startService(serviceIntent)
+                            }
+                            context.startActivity(Intent(context, SleepModeActivity::class.java))
+                        } catch (e: Exception) {
+                            android.util.Log.e("HomeScreen", "Failed starting SleepGuardService", e)
+                            Toast.makeText(context, "无法启动守护服务: ${e.localizedMessage}", Toast.LENGTH_LONG).show()
                         }
-                        context.startActivity(Intent(context, SleepModeActivity::class.java))
                     }
                 },
                 modifier = Modifier
@@ -320,7 +312,7 @@ fun HomeScreen(
             onSaveAndConnect = { mac, authKey ->
                 prefs.saveDeviceMac(mac)
                 prefs.saveAuthKeyHex(authKey)
-                bleManager.setTargetDevice("Mi Smart Band 6", mac, authKey)
+                bleManager.setTargetDevice("Mi Smart Band 6", mac, authKey, prefs.getUse2021Protocol())
                 bleManager.startScanAndConnect(mac)
                 showPairingDialog = false
             },
@@ -328,27 +320,61 @@ fun HomeScreen(
         )
     }
 
-    if (showVibrationStudio) {
-        VibrationStudioDialog(
+    if (showUnifiedSettings) {
+        UnifiedSettingsDialog(
             bleManager = bleManager,
             connectionState = connectionState,
             initialConfig = cueConfig,
+            use2021Protocol = use2021Protocol,
             onSaveConfig = { updated ->
                 prefs.updateCueConfig(updated)
                 app.remEngine.updateConfig(updated)
             },
-            onDismiss = { showVibrationStudio = false }
+            onToggle2021Protocol = { enabled ->
+                prefs.setUse2021Protocol(enabled)
+            },
+            onPickAudioFile = { audioPickerLauncher.launch("audio/*") },
+            onDismiss = { showUnifiedSettings = false }
         )
     }
 
-    if (showSensorDiagnostics) {
-        SensorDiagnosticsDialog(
-            initialConfig = cueConfig,
-            onSaveConfig = { updated ->
-                prefs.updateCueConfig(updated)
-                app.remEngine.updateConfig(updated)
+    if (showNotConnectedWarning) {
+        AlertDialog(
+            onDismissRequest = { showNotConnectedWarning = false },
+            title = {
+                Text("手环尚未连接", fontWeight = FontWeight.Bold, color = DarkTextPrimary)
             },
-            onDismiss = { showSensorDiagnostics = false }
+            text = {
+                Text(
+                    text = "手环睡眠守护需要实时采集手环的实时心率与腕部体动数据。\n\n请先在上方【设备连接状态】卡片点击【连接手环】并完成认证，待手环显示“已连接小米手环 6”后再启动守护。",
+                    color = DarkTextSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showNotConnectedWarning = false
+                        val mac = prefs.getDeviceMac()
+                        val key = prefs.getAuthKeyHex()
+                        if (mac.isBlank() || key.isBlank()) {
+                            showPairingDialog = true
+                        } else {
+                            bleManager.startScanAndConnect(mac)
+                        }
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MiBandCyan)
+                ) {
+                    Text("去连接手环", color = Color.Black, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(onClick = { showNotConnectedWarning = false }) {
+                    Text("我知道了", color = DarkTextSecondary)
+                }
+            },
+            containerColor = DarkSurfaceElevated,
+            shape = RoundedCornerShape(16.dp)
         )
     }
 }
@@ -407,10 +433,9 @@ private fun DeviceStatusCard(
                 }
 
                 Text(
-                    text = if (connectionState == BleConnectionState.CONNECTED) "已就绪" else "配对向导",
+                    text = if (connectionState == BleConnectionState.CONNECTED) "已就绪" else "待连接",
                     fontSize = 12.sp,
-                    color = MiBandCyan,
-                    modifier = Modifier.clickable { onConfigureClick() }
+                    color = if (connectionState == BleConnectionState.CONNECTED) MiBandCyan else DarkTextSecondary
                 )
             }
 

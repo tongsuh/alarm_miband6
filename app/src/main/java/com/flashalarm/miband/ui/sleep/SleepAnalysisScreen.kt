@@ -20,13 +20,20 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -72,6 +79,8 @@ fun SleepAnalysisScreen(
 
     val dateFormat = SimpleDateFormat("MM月dd日", Locale.getDefault())
     val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+
+    var showDeleteConfirmDialog by remember { mutableStateOf(false) }
 
     Box(
         modifier = modifier
@@ -169,7 +178,10 @@ fun SleepAnalysisScreen(
             // Selected Session Detail
             selectedSession?.let { session ->
                 // 1. Sleep Recap Card (大字睡眠战报卡片)
-                SleepRecapCard(session = session)
+                SleepRecapCard(
+                    session = session,
+                    onDeleteClick = { showDeleteConfirmDialog = true }
+                )
 
                 Spacer(modifier = Modifier.height(16.dp))
 
@@ -203,6 +215,48 @@ fun SleepAnalysisScreen(
             }
         }
     }
+
+    if (showDeleteConfirmDialog && selectedSession != null) {
+        AlertDialog(
+            onDismissRequest = { showDeleteConfirmDialog = false },
+            title = {
+                Text(
+                    text = "删除睡眠记录",
+                    fontWeight = FontWeight.Bold,
+                    color = DarkTextPrimary
+                )
+            },
+            text = {
+                Text(
+                    text = "确定要彻底删除该睡眠记录吗？包含的所有时序图谱、分期数据和触梦事件都将被清除，且不可恢复。",
+                    color = DarkTextSecondary,
+                    fontSize = 14.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        selectedSession?.let { s ->
+                            viewModel.deleteSession(s.sessionId)
+                        }
+                        showDeleteConfirmDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = HeartRateRed)
+                ) {
+                    Text("确认删除", color = Color.White)
+                }
+            },
+            dismissButton = {
+                OutlinedButton(
+                    onClick = { showDeleteConfirmDialog = false }
+                ) {
+                    Text("取消", color = DarkTextSecondary)
+                }
+            },
+            containerColor = DarkSurfaceElevated,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
 }
 
 /**
@@ -212,7 +266,8 @@ fun SleepAnalysisScreen(
  */
 @Composable
 private fun SleepRecapCard(
-    session: SleepSessionEntity
+    session: SleepSessionEntity,
+    onDeleteClick: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -222,6 +277,40 @@ private fun SleepRecapCard(
         colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
     ) {
         Column(modifier = Modifier.padding(20.dp)) {
+            // Header Row: Label & Delete Button
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "净睡眠时长",
+                    fontSize = 13.sp,
+                    color = DarkTextTertiary
+                )
+                Row(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .clickable { onDeleteClick() }
+                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_trash),
+                        contentDescription = "Delete Record",
+                        tint = DarkTextTertiary,
+                        modifier = Modifier.size(13.dp)
+                    )
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text(
+                        text = "删除记录",
+                        fontSize = 12.sp,
+                        color = DarkTextTertiary
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.height(2.dp))
+
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -229,13 +318,6 @@ private fun SleepRecapCard(
             ) {
                 // Left: Big Duration & Metrics
                 Column(modifier = Modifier.weight(1f)) {
-                    Text(
-                        text = "净睡眠时长",
-                        fontSize = 13.sp,
-                        color = DarkTextTertiary
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-
                     val hours = session.netSleepMinutes / 60
                     val minutes = session.netSleepMinutes % 60
                     Row(verticalAlignment = Alignment.Bottom) {

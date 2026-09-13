@@ -71,4 +71,17 @@ class SleepViewModel(application: Application) : AndroidViewModel(application) {
             selectSession(newId)
         }
     }
+
+    fun deleteSession(sessionId: Long) {
+        viewModelScope.launch {
+            repository.deleteSession(sessionId)
+            val currentList = allSessions.value.filter { it.sessionId != sessionId }
+            if (currentList.isNotEmpty()) {
+                selectSession(currentList.first().sessionId)
+            } else {
+                _selectedSessionId.value = null
+                _selectedSession.value = null
+            }
+        }
+    }
 }

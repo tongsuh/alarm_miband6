@@ -160,6 +160,12 @@ class SleepRepository(
             sessionDao.updateSession(updatedSession)
         }
 
+    suspend fun deleteSession(sessionId: Long) = withContext(Dispatchers.IO) {
+        cueDao.deleteCuesForSession(sessionId)
+        epochDao.deleteEpochsForSession(sessionId)
+        sessionDao.deleteSession(sessionId)
+    }
+
     /**
      * Seeds realistic mock sleep data for demonstration and immediate UI preview.
      */

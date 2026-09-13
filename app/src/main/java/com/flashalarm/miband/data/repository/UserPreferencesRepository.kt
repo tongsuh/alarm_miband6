@@ -37,10 +37,20 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_COOLDOWN_MIN = "pref_cooldown_min"
         private const val KEY_ENABLE_AUDIO_VERIFY = "pref_enable_audio_verify"
         private const val KEY_CONFIDENCE_THRESHOLD = "pref_confidence_threshold"
+        private const val KEY_USE_2021_PROTOCOL = "pref_use_2021_protocol"
     }
 
     private val _cueConfig = MutableStateFlow(loadCueConfig())
     val cueConfig: StateFlow<DreamCueConfig> = _cueConfig.asStateFlow()
+
+    private val _use2021Protocol = MutableStateFlow(prefs.getBoolean(KEY_USE_2021_PROTOCOL, true))
+    val use2021Protocol: StateFlow<Boolean> = _use2021Protocol.asStateFlow()
+
+    fun getUse2021Protocol(): Boolean = _use2021Protocol.value
+    fun setUse2021Protocol(enabled: Boolean) {
+        prefs.edit().putBoolean(KEY_USE_2021_PROTOCOL, enabled).apply()
+        _use2021Protocol.value = enabled
+    }
 
     fun getDeviceMac(): String = prefs.getString(KEY_MAC, "") ?: ""
     fun saveDeviceMac(mac: String) = prefs.edit().putString(KEY_MAC, mac).apply()

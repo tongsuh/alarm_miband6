@@ -123,10 +123,20 @@ class SleepGuardService : Service() {
                 startForeground(NOTIFICATION_ID, notification, foregroundType)
             } catch (e: SecurityException) {
                 Log.w(TAG, "Failed to start with microphone type, falling back to connectedDevice only", e)
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                try {
+                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                } catch (e2: Exception) {
+                    Log.e(TAG, "Failed to start connectedDevice foreground service", e2)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start foreground service", e)
             }
         } else {
-            startForeground(NOTIFICATION_ID, notification)
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start foreground service", e)
+            }
         }
 
         _isServiceRunning.value = true
@@ -146,8 +156,9 @@ class SleepGuardService : Service() {
             val prefs = app.userPreferencesRepository
             val targetMac = prefs.getDeviceMac()
             val authKey = prefs.getAuthKeyHex()
+            val use2021 = prefs.getUse2021Protocol()
             if (targetMac.isNotBlank()) {
-                app.bleManager.setTargetDevice("Mi Smart Band 6", targetMac, authKey)
+                app.bleManager.setTargetDevice("Mi Smart Band 6", targetMac, authKey, use2021)
                 app.bleManager.startScanAndConnect(targetMac)
             }
 

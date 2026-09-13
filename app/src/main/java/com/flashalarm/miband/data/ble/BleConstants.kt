@@ -15,6 +15,11 @@ object BleConstants {
     val UUID_CHAR_SENSOR_DATA: UUID = UUID.fromString("00000002-0000-3512-2118-0009af100700")
     val UUID_CHAR_SENSOR_CTRL: UUID = UUID.fromString("00000001-0000-3512-2118-0009af100700")
 
+    // Huami 2021 Chunked Protocol Characteristics (Used by Mi Band 6 firmware v1.0.6.xx+ / New Auth Protocol)
+    val UUID_CHAR_CHUNKED_2021_WRITE: UUID = UUID.fromString("00000016-0000-3512-2118-0009af100700")
+    val UUID_CHAR_CHUNKED_2021_READ: UUID = UUID.fromString("00000017-0000-3512-2118-0009af100700")
+    const val CHUNKED2021_ENDPOINT_AUTH: Short = 0x0082.toShort()
+
     // Standard Heart Rate Service (0x180D)
     val UUID_SERVICE_HEART_RATE: UUID = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
     val UUID_CHAR_HEART_RATE_MEASUREMENT: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")

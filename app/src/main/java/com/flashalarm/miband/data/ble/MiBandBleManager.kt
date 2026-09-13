@@ -58,6 +58,9 @@ class MiBandBleManager(
 
     private var bluetoothGatt: BluetoothGatt? = null
     private val authHandler = HuamiAuthHandler()
+    private val chunkedEncoder = com.flashalarm.miband.data.ble.protocol2021.Huami2021ChunkedEncoder(force2021Protocol = true)
+    private val chunkedDecoder = com.flashalarm.miband.data.ble.protocol2021.Huami2021ChunkedDecoder(force2021Protocol = true)
+    var use2021Protocol: Boolean = true
 
     // Connection state flows
     private val _connectionState = MutableStateFlow(BleConnectionState.DISCONNECTED)
@@ -94,7 +97,8 @@ class MiBandBleManager(
     private var vibrationJob: Job? = null
     private var isVibrating = false
 
-    fun setTargetDevice(name: String, mac: String, authKeyHex: String) {
+    fun setTargetDevice(name: String, mac: String, authKeyHex: String, use2021: Boolean = true) {
+        this.use2021Protocol = use2021
         val cleanKey = authKeyHex.trim()
             .replace(":", "")
             .replace(" ", "")
@@ -107,6 +111,11 @@ class MiBandBleManager(
             authKeyHex = cleanKey
         )
         authHandler.setAuthKeyHex(cleanKey)
+    }
+
+    fun setUse2021Protocol(enabled: Boolean) {
+        this.use2021Protocol = enabled
+        Log.i(TAG, "use2021Protocol set to $enabled")
     }
 
     /**
@@ -340,33 +349,33 @@ class MiBandBleManager(
                 return
             }
 
-            Log.i(TAG, "Services discovered. Searching for Huami Auth characteristic (0x0009)...")
-            _authStatusDetail.value = "已发现服务，正在检索华米认证特征..."
+            Log.i(TAG, "Services discovered. Checking for 2021 Chunked or legacy auth...")
+            _authStatusDetail.value = "已发现服务，正在检索认证特征通道..."
 
-            // Search in standard Huami Auth service (0xFEE1) or any discovered service
             var authChar: BluetoothGattCharacteristic? = null
-            val authService = gatt.getService(BleConstants.UUID_SERVICE_AUTH)
-            if (authService != null) {
-                authChar = authService.getCharacteristic(BleConstants.UUID_CHAR_AUTH)
-            }
-            if (authChar == null) {
-                for (s in gatt.services) {
-                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_AUTH)
-                    if (c != null) {
-                        authChar = c
-                        break
-                    }
-                }
+            var chunkedReadChar: BluetoothGattCharacteristic? = null
+            var chunkedWriteChar: BluetoothGattCharacteristic? = null
+
+            for (s in gatt.services) {
+                if (authChar == null) authChar = s.getCharacteristic(BleConstants.UUID_CHAR_AUTH)
+                if (chunkedReadChar == null) chunkedReadChar = s.getCharacteristic(BleConstants.UUID_CHAR_CHUNKED_2021_READ)
+                if (chunkedWriteChar == null) chunkedWriteChar = s.getCharacteristic(BleConstants.UUID_CHAR_CHUNKED_2021_WRITE)
             }
 
-            if (authChar != null) {
-                Log.i(TAG, "Huami Auth characteristic found! Enabling notification/indication...")
-                _authStatusDetail.value = "已找到认证特征，正在配置安全通道..."
+            val canUse2021 = use2021Protocol && (chunkedReadChar != null && chunkedWriteChar != null)
+
+            if (canUse2021) {
+                Log.i(TAG, "Huami 2021 Chunked characteristics found (0x0016 & 0x0017)! Enabling 2021 security channel...")
+                _authStatusDetail.value = "已匹配2021新认证通道(0x0016/0x0017)，正在配置安全分块..."
+                enableNotification(gatt, chunkedReadChar!!)
+            } else if (authChar != null) {
+                Log.i(TAG, "Huami Auth characteristic (0x0009) found! Enabling notification/indication...")
+                _authStatusDetail.value = "已找到传统认证特征(0x0009)，正在配置安全通道..."
                 enableNotification(gatt, authChar)
             } else {
-                Log.e(TAG, "Huami Auth characteristic (00000009) not found on device!")
+                Log.e(TAG, "Neither Huami 2021 nor legacy auth characteristics found on device!")
                 _connectionState.value = BleConnectionState.ERROR
-                _authStatusDetail.value = "未找到华米认证特征通道 (0x0009)"
+                _authStatusDetail.value = "未找到手环认证特征通道 (0x0009 或 0x0017)"
             }
         }
 
@@ -381,7 +390,22 @@ class MiBandBleManager(
                 return
             }
 
-            if (charUuid == BleConstants.UUID_CHAR_AUTH) {
+            if (charUuid == BleConstants.UUID_CHAR_CHUNKED_2021_READ) {
+                scope.launch(Dispatchers.IO) {
+                    delay(150L)
+                    _authStatusDetail.value = "2021安全通道就绪，生成ECDH公钥，发起握手..."
+                    chunkedDecoder.setHandler { type, payload ->
+                        if (type == BleConstants.CHUNKED2021_ENDPOINT_AUTH) {
+                            handle2021AuthPayload(gatt, payload)
+                        }
+                    }
+                    val chunks = authHandler.startHandshake2021(chunkedEncoder)
+                    for (chunk in chunks) {
+                        delay(40L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } else if (charUuid == BleConstants.UUID_CHAR_AUTH) {
                 // Dispatch with slight delay so the GATT stack transitions out of GATT_BUSY state!
                 scope.launch(Dispatchers.IO) {
                     delay(150L)
@@ -424,10 +448,61 @@ class MiBandBleManager(
                 handleCharacteristicData(it.uuid, it.value ?: ByteArray(0))
             }
         }
+
+        override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
+            Log.i(TAG, "onMtuChanged: mtu=$mtu, status=$status")
+            if (status == BluetoothGatt.GATT_SUCCESS) {
+                chunkedEncoder.setMtu(mtu)
+            }
+        }
+    }
+
+    private fun handle2021AuthPayload(gatt: BluetoothGatt?, payload: ByteArray) {
+        when (val result = authHandler.handle2021Payload(payload, chunkedEncoder, chunkedDecoder)) {
+            is AuthResult.SendChunks -> {
+                _authStatusDetail.value = "已获取2021挑战码，正在回传双重AES密文..."
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in result.chunks) {
+                        delay(40L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            }
+            is AuthResult.Success -> {
+                Log.i(TAG, "Huami 2021 authentication SUCCESSFUL! Mi Band 6 is authenticated.")
+                authTimeoutJob?.cancel()
+                authTimeoutJob = null
+                _authStatusDetail.value = "2021安全握手认证成功！手环已就绪"
+                _connectionState.value = BleConnectionState.CONNECTED
+
+                gatt?.requestMtu(512)
+
+                scope.launch(Dispatchers.IO) {
+                    delay(250L)
+                    gatt?.let { subscribeHeartRate(it) }
+                }
+            }
+            is AuthResult.Failed -> {
+                Log.e(TAG, "2021 authentication failed: ${result.error}")
+                authTimeoutJob?.cancel()
+                authTimeoutJob = null
+                _authStatusDetail.value = result.error
+                _connectionState.value = BleConnectionState.ERROR
+            }
+            else -> {}
+        }
     }
 
     private fun handleCharacteristicData(uuid: UUID, value: ByteArray) {
         when (uuid) {
+            BleConstants.UUID_CHAR_CHUNKED_2021_READ -> {
+                val needsAck = chunkedDecoder.decode(value)
+                if (needsAck) {
+                    val ack = byteArrayOf(0x04, 0x00, chunkedDecoder.lastHandle, 0x01, chunkedDecoder.lastCount)
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_READ, ack)
+                }
+            }
+
             BleConstants.UUID_CHAR_AUTH -> {
                 val hexStr = value.joinToString(separator = " ") { "%02X".format(it) }
                 Log.i(TAG, "Received AUTH characteristic update: [$hexStr]")

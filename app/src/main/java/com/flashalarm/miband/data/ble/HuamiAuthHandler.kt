@@ -1,6 +1,9 @@
 package com.flashalarm.miband.data.ble
 
 import android.util.Log
+import com.flashalarm.miband.data.ble.crypto.ECDH_B163
+import com.flashalarm.miband.data.ble.protocol2021.Huami2021ChunkedDecoder
+import com.flashalarm.miband.data.ble.protocol2021.Huami2021ChunkedEncoder
 import java.security.InvalidKeyException
 import java.security.NoSuchAlgorithmException
 import javax.crypto.BadPaddingException
@@ -11,6 +14,7 @@ import javax.crypto.spec.SecretKeySpec
 
 sealed class AuthResult {
     data class SendPacket(val data: ByteArray) : AuthResult()
+    data class SendChunks(val chunks: List<ByteArray>) : AuthResult()
     data object Success : AuthResult()
     data class Failed(val error: String) : AuthResult()
 }
@@ -225,6 +229,117 @@ class HuamiAuthHandler(
                 Log.w(TAG, "Unhandled auth opCode: raw=0x%02X, masked=0x%02X".format(rawOpCode, maskedOpCode))
                 return AuthResult.Failed("未知认证OpCode: 0x%02X".format(rawOpCode))
             }
+        }
+    }
+
+    // 2021 Chunked ECDH Protocol State & Handshake
+    private var privateEC = ByteArray(24)
+    private var publicEC = ByteArray(48)
+    private var remotePublicEC = ByteArray(48)
+    private var remoteRandom = ByteArray(16)
+    private var sharedEC: ByteArray? = null
+    val finalSharedSessionAES = ByteArray(16)
+
+    fun startHandshake2021(encoder: Huami2021ChunkedEncoder): List<ByteArray> {
+        currentStep = Step.WAITING_CHALLENGE
+        java.util.Random().nextBytes(privateEC)
+        publicEC = ECDH_B163.ecdh_generate_public(privateEC)
+
+        val sendPubkeyCommand = ByteArray(48 + 4)
+        sendPubkeyCommand[0] = 0x04
+        sendPubkeyCommand[1] = 0x02
+        sendPubkeyCommand[2] = 0x00
+        sendPubkeyCommand[3] = 0x02
+        System.arraycopy(publicEC, 0, sendPubkeyCommand, 4, 48)
+
+        Log.i(TAG, "Starting 2021 ECDH B-163 Handshake, generated 48-byte public EC key")
+        return encoder.encode(
+            type = BleConstants.CHUNKED2021_ENDPOINT_AUTH,
+            payload = sendPubkeyCommand,
+            extendedFlags = true,
+            encrypt = false
+        )
+    }
+
+    fun handle2021Payload(
+        payload: ByteArray,
+        encoder: Huami2021ChunkedEncoder,
+        decoder: Huami2021ChunkedDecoder
+    ): AuthResult {
+        if (payload.size < 3) {
+            currentStep = Step.FAILED
+            return AuthResult.Failed("2021认证返回载荷长度异常: ${payload.size}")
+        }
+
+        val prefix = payload[0]
+        val op = payload[1]
+        val status = payload[2]
+
+        if (prefix != BleConstants.AUTH_BYTE_RESPONSE_PREFIX) {
+            currentStep = Step.FAILED
+            return AuthResult.Failed("2021认证返回非标准前缀: 0x%02X".format(prefix))
+        }
+
+        if (op == 0x04.toByte() && status == BleConstants.AUTH_BYTE_SUCCESS) {
+            if (payload.size < 3 + 16 + 48) {
+                currentStep = Step.FAILED
+                return AuthResult.Failed("2021认证公钥载荷长度不足: ${payload.size}")
+            }
+
+            System.arraycopy(payload, 3, remoteRandom, 0, 16)
+            System.arraycopy(payload, 19, remotePublicEC, 0, 48)
+
+            sharedEC = ECDH_B163.ecdh_generate_shared(privateEC, remotePublicEC)
+            val sec = sharedEC ?: run {
+                currentStep = Step.FAILED
+                return AuthResult.Failed("ECDH共享密钥计算失败")
+            }
+
+            val encryptedSequenceNumber = (sec[0].toInt() and 0xFF) or
+                    ((sec[1].toInt() and 0xFF) shl 8) or
+                    ((sec[2].toInt() and 0xFF) shl 16) or
+                    ((sec[3].toInt() and 0xFF) shl 24)
+
+            for (i in 0 until 16) {
+                finalSharedSessionAES[i] = (sec[i + 8].toInt() xor authKeyBytes[i].toInt()).toByte()
+            }
+
+            encoder.setEncryptionParameters(encryptedSequenceNumber, finalSharedSessionAES)
+            decoder.setEncryptionParameters(finalSharedSessionAES)
+
+            val enc1 = encryptAes128(remoteRandom, authKeyBytes)
+            val enc2 = encryptAes128(remoteRandom, finalSharedSessionAES)
+            if (enc1 == null || enc2 == null || enc1.size != 16 || enc2.size != 16) {
+                currentStep = Step.FAILED
+                return AuthResult.Failed("双重AES-128加密运算失败")
+            }
+
+            val command = ByteArray(33)
+            command[0] = 0x05
+            System.arraycopy(enc1, 0, command, 1, 16)
+            System.arraycopy(enc2, 0, command, 17, 16)
+
+            currentStep = Step.WAITING_CONFIRMATION
+            val chunks = encoder.encode(
+                type = BleConstants.CHUNKED2021_ENDPOINT_AUTH,
+                payload = command,
+                extendedFlags = true,
+                encrypt = false
+            )
+            Log.i(TAG, "Sending 2021 double encrypted random challenge response (${chunks.size} chunks)")
+            return AuthResult.SendChunks(chunks)
+
+        } else if (op == 0x05.toByte() && status == BleConstants.AUTH_BYTE_SUCCESS) {
+            currentStep = Step.AUTHENTICATED
+            Log.i(TAG, "2021 ECDH B-163 Handshake COMPLETED WITH SUCCESS!")
+            return AuthResult.Success
+
+        } else if (op == 0x05.toByte() && status == 0x25.toByte()) {
+            currentStep = Step.FAILED
+            return AuthResult.Failed("AuthKey认证被拒绝(状态码: 0x25，密钥不匹配)。请核验AuthKey！")
+        } else {
+            currentStep = Step.FAILED
+            return AuthResult.Failed("2021认证失败 (Op: 0x%02X, Status: 0x%02X)".format(op, status))
         }
     }
 

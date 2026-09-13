@@ -28,8 +28,9 @@ class FlashAlarmApp : Application() {
         // Preload saved target device if available
         val mac = userPreferencesRepository.getDeviceMac()
         val authKey = userPreferencesRepository.getAuthKeyHex()
+        val use2021 = userPreferencesRepository.getUse2021Protocol()
         if (mac.isNotBlank()) {
-            bleManager.setTargetDevice("Mi Smart Band 6", mac, authKey)
+            bleManager.setTargetDevice("Mi Smart Band 6", mac, authKey, use2021)
         }
     }
 }

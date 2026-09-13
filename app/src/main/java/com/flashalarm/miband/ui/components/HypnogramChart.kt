@@ -79,6 +79,17 @@ fun HypnogramChart(
     var scrubX by remember { mutableStateOf(0f) }
 
     val timeFormat = remember { SimpleDateFormat("HH:mm", Locale.getDefault()) }
+    val timeWithSecFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+
+    // Find nearest dream cue if within scrubbing epoch window
+    val matchedCue = remember(scrubIndex, epochs, cues) {
+        val idx = scrubIndex ?: return@remember null
+        if (idx !in epochs.indices) return@remember null
+        val epochTime = epochs[idx].timestamp
+        cues.firstOrNull { cue ->
+            kotlin.math.abs(cue.timestamp - epochTime) <= 90_000L
+        }
+    }
 
     // Find continuous segment boundaries for current scrub index
     val scrubInfo = remember(scrubIndex, epochs) {
@@ -131,7 +142,29 @@ fun HypnogramChart(
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            if (scrubInfo != null) {
+            if (matchedCue != null) {
+                // Star marker & exact timestamp display on cue hit
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "⭐ 触梦提醒 · ${timeWithSecFormat.format(Date(matchedCue.timestamp))}",
+                        color = GoldDream,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "【${matchedCue.cadenceName}】",
+                        color = DarkTextSecondary,
+                        fontSize = 12.sp
+                    )
+                }
+                Text(
+                    text = "${scrubInfo?.heartRateBpm ?: 0} bpm",
+                    color = HeartRateRed,
+                    fontSize = 14.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            } else if (scrubInfo != null) {
                 // Minimal Stage Display: e.g. "深睡 · 00:30 ~ 01:50" (strictly no redundant duration text)
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Box(
@@ -333,26 +366,27 @@ fun HypnogramChart(
                     val currentEpoch = epochs[idx]
                     val currentStage = SleepStage.fromCode(currentEpoch.stage)
                     val cy = stageY.getValue(currentStage)
+                    val isCueHit = matchedCue != null
 
                     // Vertical glowing line
                     drawLine(
-                        color = Color.White.copy(alpha = 0.65f),
+                        color = if (isCueHit) GoldDream.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.65f),
                         start = Offset(cx, 0f),
                         end = Offset(cx, height),
-                        strokeWidth = 2f
+                        strokeWidth = if (isCueHit) 2.5f else 2f
                     )
 
                     // Outer halo
                     drawCircle(
-                        color = GoldDream.copy(alpha = 0.35f),
-                        radius = 12f,
+                        color = if (isCueHit) GoldDream.copy(alpha = 0.6f) else GoldDream.copy(alpha = 0.35f),
+                        radius = if (isCueHit) 18f else 12f,
                         center = Offset(cx, cy)
                     )
 
                     // Center dot
                     drawCircle(
-                        color = Color.White,
-                        radius = 5f,
+                        color = if (isCueHit) GoldDream else Color.White,
+                        radius = if (isCueHit) 7f else 5f,
                         center = Offset(cx, cy)
                     )
                 }
