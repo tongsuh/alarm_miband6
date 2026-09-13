@@ -7,7 +7,6 @@ import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
-import android.bluetooth.BluetoothGattService
 import android.bluetooth.BluetoothProfile
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
@@ -17,6 +16,8 @@ import android.util.Log
 import com.flashalarm.miband.domain.model.BleConnectionState
 import com.flashalarm.miband.domain.model.BleDeviceInfo
 import com.flashalarm.miband.domain.model.BleDeviceMetrics
+import com.flashalarm.miband.domain.model.CustomizableVibrationPattern
+import com.flashalarm.miband.domain.model.PatternType
 import com.flashalarm.miband.domain.model.VibrationCadenceType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,12 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.util.UUID
 import kotlin.math.sqrt
+
+data class DiscoveredBleDevice(
+    val name: String,
+    val address: String,
+    val rssi: Int
+)
 
 @SuppressLint("MissingPermission")
 class MiBandBleManager(
@@ -60,6 +67,16 @@ class MiBandBleManager(
     private val _deviceInfo = MutableStateFlow(BleDeviceInfo())
     val deviceInfo: StateFlow<BleDeviceInfo> = _deviceInfo.asStateFlow()
 
+    // Scanning state flows
+    private val _discoveredDevices = MutableStateFlow<List<DiscoveredBleDevice>>(emptyList())
+    val discoveredDevices: StateFlow<List<DiscoveredBleDevice>> = _discoveredDevices.asStateFlow()
+
+    private val _isScanning = MutableStateFlow(false)
+    val isScanning: StateFlow<Boolean> = _isScanning.asStateFlow()
+
+    private var activeScanCallback: ScanCallback? = null
+    private var scanTimeoutJob: Job? = null
+
     // Event streams
     private val _heartRateFlow = MutableSharedFlow<Int>(extraBufferCapacity = 64)
     val heartRateFlow: SharedFlow<Int> = _heartRateFlow.asSharedFlow()
@@ -80,6 +97,84 @@ class MiBandBleManager(
         authHandler.setAuthKeyHex(authKeyHex)
     }
 
+    /**
+     * Starts BLE scanning to discover nearby Mi Band or BLE devices.
+     */
+    fun startBleScan() {
+        val adapter = bluetoothAdapter ?: run {
+            Log.e(TAG, "BluetoothAdapter is null, cannot scan")
+            return
+        }
+
+        if (!adapter.isEnabled) {
+            Log.w(TAG, "Bluetooth is disabled")
+            return
+        }
+
+        val scanner = adapter.bluetoothLeScanner ?: run {
+            Log.e(TAG, "BluetoothLeScanner is null")
+            return
+        }
+
+        stopBleScan()
+        _discoveredDevices.value = emptyList()
+        _isScanning.value = true
+
+        val deviceMap = mutableMapOf<String, DiscoveredBleDevice>()
+
+        val callback = object : ScanCallback() {
+            override fun onScanResult(callbackType: Int, result: ScanResult?) {
+                val dev = result?.device ?: return
+                val address = dev.address ?: return
+                val name = (dev.name ?: result.scanRecord?.deviceName ?: "").trim()
+                val rssi = result.rssi
+
+                val displayName = if (name.isNotBlank()) name else "未知蓝牙设备 ($address)"
+                deviceMap[address] = DiscoveredBleDevice(displayName, address, rssi)
+
+                _discoveredDevices.value = deviceMap.values.sortedWith(
+                    compareByDescending<DiscoveredBleDevice> {
+                        it.name.contains("Band", ignoreCase = true) || it.name.contains("Mi", ignoreCase = true)
+                    }.thenByDescending { it.rssi }
+                )
+            }
+
+            override fun onScanFailed(errorCode: Int) {
+                Log.e(TAG, "BLE Scan failed: $errorCode")
+                _isScanning.value = false
+            }
+        }
+
+        activeScanCallback = callback
+        try {
+            scanner.startScan(callback)
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting scan", e)
+            _isScanning.value = false
+        }
+
+        // Auto-stop scan after 15 seconds
+        scanTimeoutJob?.cancel()
+        scanTimeoutJob = scope.launch(Dispatchers.Main) {
+            delay(15000L)
+            stopBleScan()
+        }
+    }
+
+    fun stopBleScan() {
+        scanTimeoutJob?.cancel()
+        scanTimeoutJob = null
+        activeScanCallback?.let { callback ->
+            try {
+                bluetoothAdapter?.bluetoothLeScanner?.stopScan(callback)
+            } catch (e: Exception) {
+                Log.w(TAG, "Error stopping scan", e)
+            }
+        }
+        activeScanCallback = null
+        _isScanning.value = false
+    }
+
     fun startScanAndConnect(targetMac: String = _deviceInfo.value.macAddress) {
         val adapter = bluetoothAdapter ?: run {
             _connectionState.value = BleConnectionState.ERROR
@@ -90,6 +185,8 @@ class MiBandBleManager(
             _connectionState.value = BleConnectionState.DISCONNECTED
             return
         }
+
+        stopBleScan()
 
         if (targetMac.isNotBlank()) {
             try {
@@ -126,7 +223,10 @@ class MiBandBleManager(
                     } catch (e: Exception) {
                         Log.e(TAG, "Error stopping scan", e)
                     }
-                    _deviceInfo.value = _deviceInfo.value.copy(name = devName.ifBlank { "Mi Smart Band 6" }, macAddress = devAddress)
+                    _deviceInfo.value = _deviceInfo.value.copy(
+                        name = devName.ifBlank { "Mi Smart Band 6" },
+                        macAddress = devAddress
+                    )
                     connectToDevice(dev)
                 }
             }
@@ -140,7 +240,7 @@ class MiBandBleManager(
         scanner.startScan(scanCallback)
     }
 
-    private fun connectToDevice(device: BluetoothDevice) {
+    fun connectToDevice(device: BluetoothDevice) {
         disconnect()
         _connectionState.value = BleConnectionState.CONNECTING
         Log.i(TAG, "Connecting to GATT device: ${device.address}")
@@ -150,8 +250,7 @@ class MiBandBleManager(
     fun disconnect() {
         hrKeepAliveJob?.cancel()
         hrKeepAliveJob = null
-        vibrationJob?.cancel()
-        vibrationJob = null
+        stopVibration()
 
         bluetoothGatt?.let { gatt ->
             try {
@@ -254,8 +353,6 @@ class MiBandBleManager(
 
             BleConstants.UUID_CHAR_HEART_RATE_MEASUREMENT -> {
                 if (value.isNotEmpty()) {
-                    // BLE Heart Rate Measurement Format:
-                    // Flags (byte 0): bit 0 -> 0 = UINT8, 1 = UINT16
                     val is16Bit = (value[0].toInt() and 0x01) != 0
                     val hr = if (is16Bit && value.size >= 3) {
                         (value[1].toInt() and 0xFF) or ((value[2].toInt() and 0xFF) shl 8)
@@ -308,7 +405,6 @@ class MiBandBleManager(
         val sensorDataChar = huamiService.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
         if (sensorDataChar != null) {
             enableNotification(gatt, sensorDataChar)
-            // Send start streaming to control char
             writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.SENSOR_START_CMD)
             _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
         }
@@ -316,8 +412,6 @@ class MiBandBleManager(
 
     private fun parseActigraphyData(data: ByteArray) {
         if (data.size < 4) return
-        // Parse 3-axis accelerometer packets (e.g. 16-bit signed delta samples)
-        // Magnitude VM = sqrt(x^2 + y^2 + z^2)
         try {
             var offset = 0
             var sumMovement = 0.0f
@@ -328,13 +422,12 @@ class MiBandBleManager(
                 val y = (data[offset + 2].toInt() and 0xFF) or (data[offset + 3].toInt() shl 8)
                 val z = (data[offset + 4].toInt() and 0xFF) or (data[offset + 5].toInt() shl 8)
 
-                // Normalize: 1g is approximately 4096 LSB or 1000 LSB depending on scale
                 val normX = x / 4096.0f
                 val normY = y / 4096.0f
                 val normZ = z / 4096.0f
 
                 val vm = sqrt(normX * normX + normY * normY + normZ * normZ)
-                val delta = kotlin.math.abs(vm - 1.0f) // ENMO / dynamic movement count
+                val delta = kotlin.math.abs(vm - 1.0f)
                 sumMovement += delta
                 sampleCount++
                 offset += 6
@@ -355,6 +448,20 @@ class MiBandBleManager(
                 delay(12000L) // 12-second ping keepalive
                 writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_PING_KEEPALIVE)
             }
+        }
+    }
+
+    /**
+     * Switch heart rate sampling between continuous 1Hz stream and periodic power-saving mode.
+     */
+    fun setHeartRateStreamingMode(isContinuous: Boolean) {
+        if (isContinuous) {
+            writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+            startHrKeepAlive()
+        } else {
+            hrKeepAliveJob?.cancel()
+            hrKeepAliveJob = null
+            writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_PING_KEEPALIVE)
         }
     }
 
@@ -389,12 +496,83 @@ class MiBandBleManager(
     }
 
     /**
-     * Executes wrist lucid dream cueing vibration using Immediate Alert Service (0x1802).
+     * Software PWM pulse-modulated vibration engine.
+     * Supports continuous intensity slider (10% - 100%), crescendo, decrescendo, and custom patterns.
+     */
+    fun triggerCustomVibration(
+        pattern: CustomizableVibrationPattern,
+        onComplete: (() -> Unit)? = null
+    ) {
+        stopVibration()
+
+        vibrationJob = scope.launch(Dispatchers.IO) {
+            isVibrating = true
+            try {
+                val totalMs = pattern.durationSeconds * 1000L
+                val startTime = System.currentTimeMillis()
+
+                while (isActive && (System.currentTimeMillis() - startTime) < totalMs) {
+                    val elapsed = System.currentTimeMillis() - startTime
+                    val progress = (elapsed.toFloat() / totalMs).coerceIn(0f, 1f)
+
+                    val currentIntensity = when (pattern.type) {
+                        PatternType.CRESCENDO -> {
+                            pattern.startIntensityPercent + ((pattern.endIntensityPercent - pattern.startIntensityPercent) * progress).toInt()
+                        }
+                        PatternType.DECRESCENDO -> {
+                            pattern.startIntensityPercent - ((pattern.startIntensityPercent - pattern.endIntensityPercent) * progress).toInt()
+                        }
+                        PatternType.HEARTBEAT -> {
+                            pattern.startIntensityPercent
+                        }
+                        PatternType.STEADY, PatternType.PULSE_WAVE -> {
+                            pattern.startIntensityPercent
+                        }
+                    }.coerceIn(10, 100)
+
+                    // Duty cycle calculation:
+                    // Alert level 0x01 (Mild) for <= 50%, Alert level 0x02 (Strong) for > 50%
+                    val alertLevel = if (currentIntensity > 50) 0x02 else 0x01
+                    val dutyCycle = (currentIntensity / 100f).coerceIn(0.15f, 1.0f)
+                    val onTimeMs = (pattern.pulseMs * dutyCycle).toLong().coerceAtLeast(30L)
+                    val offTimeMs = (pattern.pulseMs - onTimeMs).coerceAtLeast(0L)
+
+                    // Pulse ON
+                    writeAlertLevel(alertLevel)
+                    delay(onTimeMs)
+
+                    // Pulse OFF
+                    writeAlertLevel(0x00)
+                    if (offTimeMs > 0L) {
+                        delay(offTimeMs)
+                    }
+
+                    // Special rhythmic handling for heartbeat (lub-dub)
+                    if (pattern.type == PatternType.HEARTBEAT) {
+                        delay(80L)
+                        writeAlertLevel(0x01)
+                        delay((onTimeMs * 0.7f).toLong().coerceAtLeast(30L))
+                        writeAlertLevel(0x00)
+                    }
+
+                    // Rest period between beats
+                    delay(pattern.pauseMs.toLong().coerceAtLeast(50L))
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in custom vibration job", e)
+            } finally {
+                writeAlertLevel(0x00)
+                isVibrating = false
+                onComplete?.invoke()
+            }
+        }
+    }
+
+    /**
+     * Backward-compatible trigger for legacy cadence types.
      */
     fun triggerCadenceVibration(cadenceType: VibrationCadenceType) {
-        if (isVibrating) return
         val pattern = VibrationCadenceProfiles.getPattern(cadenceType)
-
         vibrationJob?.cancel()
         vibrationJob = scope.launch(Dispatchers.IO) {
             isVibrating = true
@@ -405,10 +583,8 @@ class MiBandBleManager(
                     val isVibrateStep = (i % 2 == 0)
 
                     if (isVibrateStep) {
-                        // Alert level: 0x01 (Mild Alert)
                         writeAlertLevel(0x01)
                     } else {
-                        // Alert level: 0x00 (No Alert)
                         writeAlertLevel(0x00)
                     }
                     delay(duration)
@@ -418,6 +594,13 @@ class MiBandBleManager(
                 isVibrating = false
             }
         }
+    }
+
+    fun stopVibration() {
+        vibrationJob?.cancel()
+        vibrationJob = null
+        writeAlertLevel(0x00)
+        isVibrating = false
     }
 
     private fun writeAlertLevel(level: Int) {

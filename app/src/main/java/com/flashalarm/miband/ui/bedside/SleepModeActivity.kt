@@ -10,6 +10,7 @@ import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,6 +25,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,9 +46,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.flashalarm.miband.FlashAlarmApp
 import com.flashalarm.miband.R
+import com.flashalarm.miband.domain.model.SleepSessionPhase
 import com.flashalarm.miband.service.SleepGuardService
 import com.flashalarm.miband.ui.components.SlideToStopSlider
 import com.flashalarm.miband.ui.theme.DarkBorder
+import com.flashalarm.miband.ui.theme.DarkSurfaceElevated
 import com.flashalarm.miband.ui.theme.DarkTextPrimary
 import com.flashalarm.miband.ui.theme.DarkTextSecondary
 import com.flashalarm.miband.ui.theme.DarkTextTertiary
@@ -65,7 +69,6 @@ class SleepModeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Configure full screen and keep screen on for OLED bedside display
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             setShowWhenLocked(true)
@@ -118,7 +121,6 @@ fun SleepModeScreen(
     var currentTimeStr by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
 
-    // 1-second clock tick
     LaunchedEffect(Unit) {
         while (true) {
             currentTimeStr = timeFormat.format(Date())
@@ -175,14 +177,44 @@ fun SleepModeScreen(
             // Soft dim digital clock (low burn-in risk)
             Text(
                 text = currentTimeStr.ifBlank { "--:--:--" },
-                fontSize = 46.sp,
+                fontSize = 48.sp,
                 fontWeight = FontWeight.Light,
                 fontFamily = FontFamily.Monospace,
                 letterSpacing = 1.sp,
-                color = Color(0xFFC0A868) // Soft muted warm amber
+                color = Color(0xFFC0A868)
             )
 
-            Spacer(modifier = Modifier.height(28.dp))
+            Spacer(modifier = Modifier.height(20.dp))
+
+            // Relative Sleep Phase Status Pill
+            val currentPhase = liveStaging?.sessionPhase ?: SleepSessionPhase.DETECTING_ONSET
+            val phaseColor = when (currentPhase) {
+                SleepSessionPhase.DETECTING_ONSET -> DarkTextSecondary
+                SleepSessionPhase.PROTECTION_PERIOD -> MiBandCyan
+                SleepSessionPhase.DREAM_WINDOW_ACTIVE -> GoldDream
+            }
+            val phaseText = when (currentPhase) {
+                SleepSessionPhase.DETECTING_ONSET -> "🌙 正在监测入睡状态 (静息沉淀中...)"
+                SleepSessionPhase.PROTECTION_PERIOD -> "🛡️ 前半夜深睡保护期 (剩余 ${liveStaging?.protectionRemainingMinutes ?: 0} 分钟)"
+                SleepSessionPhase.DREAM_WINDOW_ACTIVE -> "✨ REM触梦雷达已全开 (命中即下发)"
+            }
+
+            Box(
+                modifier = Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(DarkSurfaceElevated)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(20.dp))
+                    .padding(horizontal = 14.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = phaseText,
+                    fontSize = 12.sp,
+                    color = phaseColor,
+                    fontWeight = FontWeight.Medium
+                )
+            }
+
+            Spacer(modifier = Modifier.height(24.dp))
 
             // Real-time sensor readout chips
             Row(
@@ -215,7 +247,7 @@ fun SleepModeScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (metrics.actigraphyG > 0.05f) "翻身中" else "肌肉瘫痪(静止)",
+                        text = if (metrics.actigraphyG > 0.05f) "翻身中" else "肌肉静息",
                         fontSize = 14.sp,
                         color = DarkTextSecondary
                     )
@@ -235,7 +267,6 @@ fun SleepModeScreen(
 
             Spacer(modifier = Modifier.height(16.dp))
 
-            // Stage confidence or timing note
             liveStaging?.let { staging ->
                 Text(
                     text = staging.triggerReason,

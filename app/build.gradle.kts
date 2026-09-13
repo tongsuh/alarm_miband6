@@ -22,6 +22,21 @@ android {
         }
     }
 
+    base {
+        archivesName.set("Dream_mili6")
+    }
+
+    applicationVariants.all {
+        outputs.all {
+            val outputImpl = this as? com.android.build.gradle.internal.api.BaseVariantOutputImpl
+            if (buildType.name == "release") {
+                outputImpl?.outputFileName = "Dream_mili6.apk"
+            } else {
+                outputImpl?.outputFileName = "Dream_mili6-debug.apk"
+            }
+        }
+    }
+
     signingConfigs {
         create("release") {
             storeFile = file("release.jks")

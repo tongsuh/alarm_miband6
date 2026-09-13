@@ -2,15 +2,14 @@ package com.flashalarm.miband.domain.algorithm
 
 import com.flashalarm.miband.domain.model.DreamCueConfig
 import com.flashalarm.miband.domain.model.RemStagingResult
+import com.flashalarm.miband.domain.model.SleepSessionPhase
 import com.flashalarm.miband.domain.model.SleepStage
-import kotlin.math.abs
-import kotlin.math.max
 import kotlin.math.sqrt
 
 /**
  * MultiModalRemEngine
  * Implements the 75% Wrist Actigraphy + PPG HR/HRV & 25% Phone Acoustic Breathing
- * layered fusion REM staging and lucid dream cue dispatch engine.
+ * layered fusion REM staging and relative-onset lucid dream cue dispatch engine.
  */
 class MultiModalRemEngine(
     private var cueConfig: DreamCueConfig = DreamCueConfig()
@@ -18,9 +17,11 @@ class MultiModalRemEngine(
     // Session state
     private var sessionStartTimeMs: Long = 0L
     private var sleepOnsetDetectedTimeMs: Long = 0L
+    private var isSleepOnsetDetected: Boolean = false
+    private var sustainedStillnessEpochs: Int = 0
     private var lastCueTriggerTimeMs: Long = 0L
 
-    // Sliding buffers (last N samples / minutes)
+    // Sliding buffers (last N samples / epochs)
     private val recentHeartRates = ArrayDeque<Int>()
     private val recentActigraphy = ArrayDeque<Float>()
     private val recentAudioIrregularities = ArrayDeque<Float>()
@@ -35,7 +36,9 @@ class MultiModalRemEngine(
 
     fun startSession(startTimeMs: Long = System.currentTimeMillis()) {
         sessionStartTimeMs = startTimeMs
-        sleepOnsetDetectedTimeMs = startTimeMs + (15 * 60 * 1000L) // Default onset ~15 min
+        sleepOnsetDetectedTimeMs = 0L
+        isSleepOnsetDetected = false
+        sustainedStillnessEpochs = 0
         lastCueTriggerTimeMs = 0L
         recentHeartRates.clear()
         recentActigraphy.clear()
@@ -60,7 +63,7 @@ class MultiModalRemEngine(
         currentTimeMs: Long = System.currentTimeMillis()
     ): RemStagingResult {
         // 1. Maintain sliding window (last 60 samples ~ 1-5 minutes)
-        if (heartRate > 35 && heartRate < 220) {
+        if (heartRate in 36..219) {
             recentHeartRates.addLast(heartRate)
             if (recentHeartRates.size > 60) recentHeartRates.removeFirst()
         }
@@ -74,7 +77,6 @@ class MultiModalRemEngine(
         }
 
         // 2. Wrist Actigraphy: Muscle Atonia & VETO Trigger
-        // Threshold: gross body movement / arm turnover >= 0.15g activity count
         val maxRecentMovement = recentActigraphy.maxOrNull() ?: actigraphyMagnitude
         val avgMovement = if (recentActigraphy.isNotEmpty()) recentActigraphy.average().toFloat() else actigraphyMagnitude
         val isVetoedByMovement = maxRecentMovement > 0.14f || actigraphyMagnitude > 0.18f
@@ -89,7 +91,7 @@ class MultiModalRemEngine(
             recentHeartRates.map { (it - mean) * (it - mean) }.average().toFloat()
         } else 0f
         val hrStdDev = sqrt(hrVariance)
-        val hrvCv = if (currentMeanHr > 0) (hrStdDev / currentMeanHr) else 0f // Coefficient of Variation
+        val hrvCv = if (currentMeanHr > 0) (hrStdDev / currentMeanHr) else 0f
 
         // Update deep sleep baseline during prolonged quiet, low-HR epochs
         if (atoniaScore > 0.85f && hrvCv < 0.04f && currentMeanHr in 45.0f..85.0f) {
@@ -97,7 +99,6 @@ class MultiModalRemEngine(
                 baselineEstablished = true
                 currentMeanHr
             } else {
-                // Exponential moving average towards lowest stable floor
                 deepSleepBaselineHr * 0.95f + currentMeanHr * 0.05f
             }
         }
@@ -107,12 +108,44 @@ class MultiModalRemEngine(
             ((currentMeanHr - deepSleepBaselineHr) / deepSleepBaselineHr).coerceAtLeast(0f)
         } else 0f
 
-        // 4. Timing Constraints: Sleep Onset Window & Nocturnal Phase
-        val elapsedSinceOnsetMs = currentTimeMs - sleepOnsetDetectedTimeMs
-        val minOnsetMs = cueConfig.minSleepOnsetMinutes * 60 * 1000L
-        val isWithinTimingWindow = elapsedSinceOnsetMs >= minOnsetMs
+        // 4. Sleep Onset Detection State Machine (Cole-Kripke stillness + resting HR dip)
+        if (!isSleepOnsetDetected) {
+            if (avgMovement < 0.04f && atoniaScore >= 0.65f) {
+                sustainedStillnessEpochs++
+                // ~10 minutes of quiet breathing (20 x 30s epochs or 16 epochs)
+                if (sustainedStillnessEpochs >= 16) {
+                    isSleepOnsetDetected = true
+                    sleepOnsetDetectedTimeMs = currentTimeMs
+                }
+            } else if (avgMovement > 0.15f) {
+                // User rolled over or got up
+                sustainedStillnessEpochs = (sustainedStillnessEpochs - 3).coerceAtLeast(0)
+            }
+        }
 
-        // 5. Acoustic Respiratory Analysis (if reliable)
+        // Determine session phase & relative protection timing
+        val protectionDurationMs = (cueConfig.sleepOnsetProtectionHours * 3600 * 1000L).toLong()
+        val elapsedSinceOnsetMs = if (isSleepOnsetDetected) currentTimeMs - sleepOnsetDetectedTimeMs else 0L
+
+        val sessionPhase: SleepSessionPhase
+        val protectionRemainingMinutes: Int
+        val isWithinTimingWindow: Boolean
+
+        if (!isSleepOnsetDetected) {
+            sessionPhase = SleepSessionPhase.DETECTING_ONSET
+            protectionRemainingMinutes = (cueConfig.sleepOnsetProtectionHours * 60).toInt()
+            isWithinTimingWindow = false
+        } else if (elapsedSinceOnsetMs < protectionDurationMs) {
+            sessionPhase = SleepSessionPhase.PROTECTION_PERIOD
+            protectionRemainingMinutes = ((protectionDurationMs - elapsedSinceOnsetMs) / 60000L).toInt().coerceAtLeast(1)
+            isWithinTimingWindow = false
+        } else {
+            sessionPhase = SleepSessionPhase.DREAM_WINDOW_ACTIVE
+            protectionRemainingMinutes = 0
+            isWithinTimingWindow = true
+        }
+
+        // 5. Acoustic Respiratory Analysis
         val avgAudioIrregularity = if (recentAudioIrregularities.isNotEmpty()) {
             recentAudioIrregularities.average().toFloat()
         } else {
@@ -124,13 +157,10 @@ class MultiModalRemEngine(
         var remConfidence = 0.0f
 
         if (isVetoedByMovement || avgMovement > 0.25f) {
-            // Significant motor movement -> Awake
             determinedStage = SleepStage.AWAKE
             remConfidence = 0.0f
         } else if (atoniaScore > 0.70f) {
-            // Stable stillness: distinguish DEEP vs LIGHT vs REM
             if (hrSurgePercent >= 0.08f && (hrvCv >= 0.05f || hrStdDev >= 3.5f)) {
-                // Autonomic storm: elevated HR & dispersed HRV
                 determinedStage = SleepStage.REM
 
                 // 75% Wrist Actigraphy & PPG HR/HRV Score
@@ -139,29 +169,23 @@ class MultiModalRemEngine(
                         (hrvCv.coerceIn(0.04f, 0.12f) / 0.12f * 0.25f)
 
                 if (isAudioReliable && avgAudioIrregularity >= 0f) {
-                    // Multi-modal 75% + 25% fusion
                     val audioScore = avgAudioIrregularity.coerceIn(0.0f, 1.0f)
                     remConfidence = (wristScore * 0.75f) + (audioScore * 0.25f)
                 } else {
-                    // Graceful fallback to pure wrist-band model (100%)
                     remConfidence = wristScore.coerceIn(0.0f, 1.0f)
                 }
             } else if (hrSurgePercent < 0.05f && hrvCv < 0.04f) {
-                // Lowest heart rate, minimal variation -> Deep sleep (N3)
                 determinedStage = SleepStage.DEEP
                 remConfidence = 0.0f
             } else {
-                // Moderate variation, steady heart rate -> Light sleep (N1/N2)
                 determinedStage = SleepStage.LIGHT
                 remConfidence = 0.15f
             }
         } else {
-            // Low-medium movement -> Light sleep
             determinedStage = SleepStage.LIGHT
             remConfidence = 0.05f
         }
 
-        // If vetoed by movement, force confidence to 0
         if (isVetoedByMovement) {
             remConfidence = 0.0f
         }
@@ -181,7 +205,8 @@ class MultiModalRemEngine(
         val triggerReason = when {
             shouldTrigger -> "双重印证命中REM高置信期 (置信度 ${(remConfidence * 100).toInt()}%)"
             isVetoedByMovement -> "手腕体动一票否决"
-            !isWithinTimingWindow -> "入睡时间未满 ${cueConfig.minSleepOnsetMinutes} 分钟，处于前半夜保护窗"
+            !isSleepOnsetDetected -> "正在监测入睡状态 (静息沉淀 ${sustainedStillnessEpochs}/16)"
+            sessionPhase == SleepSessionPhase.PROTECTION_PERIOD -> "处于前半夜深睡保护期 (剩余 $protectionRemainingMinutes 分钟)"
             !isCooldownPassed -> "处于击发冷却间隔中 (${((cooldownMs - (currentTimeMs - lastCueTriggerTimeMs)) / 60000)}分钟后解锁)"
             !meetsConfidence -> "置信度不足 ${(remConfidence * 100).toInt()}% / ${(cueConfig.confidenceThreshold * 100).toInt()}%"
             else -> "非做梦期"
@@ -203,11 +228,16 @@ class MultiModalRemEngine(
             audioIrregularity = if (avgAudioIrregularity >= 0f) avgAudioIrregularity else 0f,
             isVetoedByMovement = isVetoedByMovement,
             isWithinTimingWindow = isWithinTimingWindow,
+            sessionPhase = sessionPhase,
+            isSleepOnsetDetected = isSleepOnsetDetected,
+            protectionRemainingMinutes = protectionRemainingMinutes,
+            sleepOnsetDetectedTimeMs = sleepOnsetDetectedTimeMs,
             timestamp = currentTimeMs
         )
     }
 
     fun markSleepOnset(onsetMs: Long) {
+        isSleepOnsetDetected = true
         sleepOnsetDetectedTimeMs = onsetMs
     }
 

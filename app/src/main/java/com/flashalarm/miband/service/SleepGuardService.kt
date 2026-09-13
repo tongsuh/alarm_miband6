@@ -1,5 +1,6 @@
 package com.flashalarm.miband.service
 
+import android.Manifest
 import android.annotation.SuppressLint
 import android.app.Notification
 import android.app.NotificationChannel
@@ -8,6 +9,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Binder
 import android.os.Build
@@ -15,14 +17,12 @@ import android.os.IBinder
 import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.flashalarm.miband.FlashAlarmApp
 import com.flashalarm.miband.MainActivity
 import com.flashalarm.miband.R
-import com.flashalarm.miband.data.audio.BreathingAudioAnalyzer
-import com.flashalarm.miband.data.ble.MiBandBleManager
-import com.flashalarm.miband.domain.algorithm.MultiModalRemEngine
 import com.flashalarm.miband.domain.model.RemStagingResult
-import com.flashalarm.miband.domain.model.SleepStage
+import com.flashalarm.miband.domain.model.SleepSessionPhase
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -106,14 +106,25 @@ class SleepGuardService : Service() {
         val app = applicationContext as FlashAlarmApp
         val notification = buildNotification("正在监测睡眠体动与心率...")
 
+        // Android 14 (API 34) Foreground Service Permission Safety:
+        // Starting with type MICROPHONE without RECORD_AUDIO permission throws SecurityException!
+        val hasAudioPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        val enableAudio = app.userPreferencesRepository.cueConfig.value.enableAudioVerification && hasAudioPermission
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val foregroundServiceType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            } else {
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            var foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && enableAudio) {
+                foregroundType = foregroundType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
             }
-            startForeground(NOTIFICATION_ID, notification, foregroundServiceType)
+            try {
+                startForeground(NOTIFICATION_ID, notification, foregroundType)
+            } catch (e: SecurityException) {
+                Log.w(TAG, "Failed to start with microphone type, falling back to connectedDevice only", e)
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            }
         } else {
             startForeground(NOTIFICATION_ID, notification)
         }
@@ -127,7 +138,8 @@ class SleepGuardService : Service() {
             _currentSessionId.value = sessionId
 
             // 2. Start REM Engine
-            app.remEngine.updateConfig(app.userPreferencesRepository.cueConfig.value)
+            val config = app.userPreferencesRepository.cueConfig.value
+            app.remEngine.updateConfig(config)
             app.remEngine.startSession()
 
             // 3. Connect BLE if disconnected
@@ -139,9 +151,13 @@ class SleepGuardService : Service() {
                 app.bleManager.startScanAndConnect(targetMac)
             }
 
-            // 4. Start Audio Analyzer if configured
-            if (prefs.cueConfig.value.enableAudioVerification) {
-                app.audioAnalyzer.startAnalysis()
+            // 4. Start Audio Analyzer if configured and permitted
+            if (enableAudio) {
+                try {
+                    app.audioAnalyzer.startAnalysis()
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed starting audio analyzer", e)
+                }
             }
 
             // 5. Collect incoming sensor flows
@@ -178,6 +194,12 @@ class SleepGuardService : Service() {
 
                 _liveStaging.value = stagingResult
 
+                // Differential Heart Rate Sampling adjustment:
+                // When in DREAM_WINDOW_ACTIVE, switch band to continuous 1Hz sampling
+                if (stagingResult.sessionPhase == SleepSessionPhase.DREAM_WINDOW_ACTIVE) {
+                    app.bleManager.setHeartRateStreamingMode(true)
+                }
+
                 // Record epoch in DB
                 app.sleepRepository.recordEpoch(
                     sessionId = sessionId,
@@ -192,24 +214,46 @@ class SleepGuardService : Service() {
                 // If Lucid Dream Cue triggered!
                 if (stagingResult.isDreamCueTriggered) {
                     val config = app.userPreferencesRepository.cueConfig.value
-                    Log.i(TAG, "LUCID DREAM CUE TRIGGERED! Cadence: ${config.cadenceType}")
+                    val activePattern = config.getActivePattern()
+                    Log.i(TAG, "LUCID DREAM CUE TRIGGERED! Pattern: ${activePattern.name}")
 
-                    // Send vibration to wrist
-                    app.bleManager.triggerCadenceVibration(config.cadenceType)
+                    // 1. Dispatch Wrist Motor Vibration (if enabled)
+                    if (config.enableWristVibration) {
+                        app.bleManager.triggerCustomVibration(activePattern)
+                    }
 
-                    // Record cue event
+                    // 2. Dispatch Audio Whisper Cue (if enabled)
+                    if (config.enableAudioPlayback) {
+                        app.audioPlayer.playCueAudio(
+                            filePath = config.customAudioPath,
+                            durationSeconds = config.audioDurationSeconds,
+                            volumePercent = config.audioVolumePercent
+                        )
+                    }
+
+                    // 3. Record cue event
+                    val methodDescription = buildString {
+                        if (config.enableWristVibration) append("手环微震[${activePattern.name}] ")
+                        if (config.enableAudioPlayback) append("手机音频[${config.customAudioName}]")
+                    }.trim()
+
                     app.sleepRepository.recordCue(
                         sessionId = sessionId,
                         timestamp = stagingResult.timestamp,
-                        cadenceName = config.cadenceType.displayName,
+                        cadenceName = methodDescription.ifBlank { activePattern.name },
                         confidence = stagingResult.confidence,
                         heartRate = lastHeartRate,
                         triggerReason = stagingResult.triggerReason
                     )
 
-                    updateNotification("✨ 黄金触梦已下发手腕 (置信度 ${(stagingResult.confidence * 100).toInt()}%)")
+                    updateNotification("✨ 黄金触梦已激发 ($methodDescription | 置信度 ${(stagingResult.confidence * 100).toInt()}%)")
                 } else {
-                    updateNotification("当前阶段: ${stagingResult.stage.displayName} | 心率 $lastHeartRate bpm")
+                    val phaseDesc = when (stagingResult.sessionPhase) {
+                        SleepSessionPhase.DETECTING_ONSET -> "监测入睡中"
+                        SleepSessionPhase.PROTECTION_PERIOD -> "深睡保护期(余${stagingResult.protectionRemainingMinutes}分)"
+                        SleepSessionPhase.DREAM_WINDOW_ACTIVE -> "触梦雷达全程开启"
+                    }
+                    updateNotification("$phaseDesc | ${stagingResult.stage.displayName} | 心率 $lastHeartRate bpm")
                 }
             }
         }
@@ -221,6 +265,8 @@ class SleepGuardService : Service() {
 
         val app = applicationContext as FlashAlarmApp
         app.audioAnalyzer.stopAnalysis()
+        app.audioPlayer.stopAudio()
+        app.bleManager.stopVibration()
 
         serviceScope.launch {
             if (currentActiveSessionId > 0L) {

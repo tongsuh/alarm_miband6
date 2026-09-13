@@ -1,7 +1,13 @@
 package com.flashalarm.miband.ui.home
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -21,20 +27,17 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
-import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.OutlinedTextFieldDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -51,10 +54,11 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.core.content.ContextCompat
 import com.flashalarm.miband.FlashAlarmApp
 import com.flashalarm.miband.R
 import com.flashalarm.miband.domain.model.BleConnectionState
-import com.flashalarm.miband.domain.model.VibrationCadenceType
+import com.flashalarm.miband.domain.model.DreamCueConfig
 import com.flashalarm.miband.service.SleepGuardService
 import com.flashalarm.miband.ui.bedside.SleepModeActivity
 import com.flashalarm.miband.ui.theme.AlertPurple
@@ -77,6 +81,7 @@ fun HomeScreen(
     val app = context.applicationContext as FlashAlarmApp
     val bleManager = app.bleManager
     val prefs = app.userPreferencesRepository
+    val audioPlayer = app.audioPlayer
 
     val connectionState by bleManager.connectionState.collectAsState()
     val deviceMetrics by bleManager.deviceMetrics.collectAsState()
@@ -84,7 +89,32 @@ fun HomeScreen(
     val cueConfig by prefs.cueConfig.collectAsState()
     val isServiceRunning by SleepGuardService.isServiceRunning.collectAsState()
 
-    var showConfigDialog by remember { mutableStateOf(false) }
+    var showPairingDialog by remember { mutableStateOf(false) }
+    var showVibrationStudio by remember { mutableStateOf(false) }
+    var showSensorDiagnostics by remember { mutableStateOf(false) }
+    var isTestingAudio by remember { mutableStateOf(false) }
+
+    // Audio file picker launcher (copies file to app private sandbox immediately)
+    val audioPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val saved = audioPlayer.saveCustomAudioToSandbox(uri)
+            if (saved != null) {
+                val (filePath, displayName) = saved
+                val updated = cueConfig.copy(
+                    customAudioPath = filePath,
+                    customAudioName = displayName,
+                    enableAudioPlayback = true
+                )
+                prefs.updateCueConfig(updated)
+                app.remEngine.updateConfig(updated)
+                Toast.makeText(context, "已成功导入音频: $displayName", Toast.LENGTH_SHORT).show()
+            } else {
+                Toast.makeText(context, "导入音频文件失败", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
     Box(
         modifier = modifier
@@ -96,9 +126,9 @@ fun HomeScreen(
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
                 .padding(horizontal = 20.dp, vertical = 24.dp)
-                .padding(bottom = 90.dp) // Room for floating capsule button
+                .padding(bottom = 96.dp)
         ) {
-            // App Title Header
+            // App Title Header & Action Buttons
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -118,27 +148,48 @@ fun HomeScreen(
                     )
                 }
 
-                // Settings icon button
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(CircleShape)
-                        .background(DarkSurfaceElevated)
-                        .clickable { showConfigDialog = true },
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.ic_settings),
-                        contentDescription = "Device Settings",
-                        tint = DarkTextSecondary,
-                        modifier = Modifier.size(20.dp)
-                    )
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    // Sensor Diagnostics button
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(DarkSurfaceElevated)
+                            .border(1.dp, DarkBorder, CircleShape)
+                            .clickable { showSensorDiagnostics = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_heart),
+                            contentDescription = "Sensor Diagnostics",
+                            tint = HeartRateRed,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+
+                    // BLE Pairing settings button
+                    Box(
+                        modifier = Modifier
+                            .size(42.dp)
+                            .clip(CircleShape)
+                            .background(DarkSurfaceElevated)
+                            .border(1.dp, DarkBorder, CircleShape)
+                            .clickable { showPairingDialog = true },
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.ic_settings),
+                            contentDescription = "Device Settings",
+                            tint = DarkTextSecondary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
                 }
             }
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // 1. Device Connection Card
+            // 1. Device Connection Status Card
             DeviceStatusCard(
                 connectionState = connectionState,
                 deviceInfo = deviceInfo,
@@ -147,27 +198,46 @@ fun HomeScreen(
                     val mac = prefs.getDeviceMac()
                     val key = prefs.getAuthKeyHex()
                     if (mac.isBlank() || key.isBlank()) {
-                        showConfigDialog = true
+                        showPairingDialog = true
                     } else {
                         bleManager.startScanAndConnect(mac)
                     }
                 },
-                onConfigureClick = { showConfigDialog = true }
+                onConfigureClick = { showPairingDialog = true },
+                onDisconnectClick = { bleManager.disconnect() }
             )
 
             Spacer(modifier = Modifier.height(18.dp))
 
-            // 2. Lucid Dream Cueing Configuration Card
+            // 2. Lucid Dream Cueing Configuration Card (Dual Channels & Sliders)
             DreamCueConfigCard(
                 cueConfig = cueConfig,
+                connectionState = connectionState,
+                isTestingAudio = isTestingAudio,
                 onConfigChange = { updated ->
                     prefs.updateCueConfig(updated)
                     app.remEngine.updateConfig(updated)
                 },
-                onTestVibration = {
+                onOpenVibrationStudio = { showVibrationStudio = true },
+                onPickAudioFile = { audioPickerLauncher.launch("audio/*") },
+                onToggleAudioTest = {
+                    if (isTestingAudio) {
+                        audioPlayer.stopAudio()
+                        isTestingAudio = false
+                    } else {
+                        isTestingAudio = true
+                        audioPlayer.playCueAudio(
+                            filePath = cueConfig.customAudioPath,
+                            durationSeconds = cueConfig.audioDurationSeconds,
+                            volumePercent = cueConfig.audioVolumePercent,
+                            onComplete = { isTestingAudio = false }
+                        )
+                    }
+                },
+                onQuickTestVibration = {
                     if (connectionState == BleConnectionState.CONNECTED) {
-                        bleManager.triggerCadenceVibration(cueConfig.cadenceType)
-                        Toast.makeText(context, "已下发测试微震脉冲到手环", Toast.LENGTH_SHORT).show()
+                        bleManager.triggerCustomVibration(cueConfig.getActivePattern())
+                        Toast.makeText(context, "手环正在试震【${cueConfig.getActivePattern().name}】", Toast.LENGTH_SHORT).show()
                     } else {
                         Toast.makeText(context, "请先连接小米手环 6", Toast.LENGTH_SHORT).show()
                     }
@@ -195,21 +265,23 @@ fun HomeScreen(
             Button(
                 onClick = {
                     if (isServiceRunning) {
-                        // Open Bedside Clock Screen directly
                         context.startActivity(Intent(context, SleepModeActivity::class.java))
                     } else {
-                        // Start service
                         val serviceIntent = Intent(context, SleepGuardService::class.java).apply {
                             action = SleepGuardService.ACTION_START_GUARD
                         }
-                        context.startForegroundService(serviceIntent)
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            context.startForegroundService(serviceIntent)
+                        } else {
+                            context.startService(serviceIntent)
+                        }
                         context.startActivity(Intent(context, SleepModeActivity::class.java))
                     }
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(58.dp),
-                shape = RoundedCornerShape(29.dp),
+                    .height(56.dp),
+                shape = RoundedCornerShape(28.dp),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = if (isServiceRunning) Color(0xFFEF4444) else GoldDream
                 ),
@@ -227,7 +299,7 @@ fun HomeScreen(
                     )
                     Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = if (isServiceRunning) "已在守护中 · 点击进入床头屏保" else "🌙 开始手环睡眠守护",
+                        text = if (isServiceRunning) "守护进行中 · 点击进入床头屏保" else "🌙 开始手环睡眠守护",
                         color = if (isServiceRunning) Color.White else Color.Black,
                         fontSize = 16.sp,
                         fontWeight = FontWeight.Bold
@@ -237,18 +309,44 @@ fun HomeScreen(
         }
     }
 
-    // Bluetooth MAC & AuthKey Config Dialog
-    if (showConfigDialog) {
-        DeviceConfigDialog(
-            currentMac = prefs.getDeviceMac(),
-            currentKey = prefs.getAuthKeyHex(),
-            onDismiss = { showConfigDialog = false },
-            onSave = { mac, key ->
+    // Dialogs
+    if (showPairingDialog) {
+        DevicePairingDialog(
+            bleManager = bleManager,
+            initialMac = prefs.getDeviceMac(),
+            initialAuthKey = prefs.getAuthKeyHex(),
+            onSaveAndConnect = { mac, authKey ->
                 prefs.saveDeviceMac(mac)
-                prefs.saveAuthKeyHex(key)
-                bleManager.setTargetDevice("Mi Smart Band 6", mac, key)
-                showConfigDialog = false
-            }
+                prefs.saveAuthKeyHex(authKey)
+                bleManager.setTargetDevice("Mi Smart Band 6", mac, authKey)
+                bleManager.startScanAndConnect(mac)
+                showPairingDialog = false
+            },
+            onDismiss = { showPairingDialog = false }
+        )
+    }
+
+    if (showVibrationStudio) {
+        VibrationStudioDialog(
+            bleManager = bleManager,
+            connectionState = connectionState,
+            initialConfig = cueConfig,
+            onSaveConfig = { updated ->
+                prefs.updateCueConfig(updated)
+                app.remEngine.updateConfig(updated)
+            },
+            onDismiss = { showVibrationStudio = false }
+        )
+    }
+
+    if (showSensorDiagnostics) {
+        SensorDiagnosticsDialog(
+            initialConfig = cueConfig,
+            onSaveConfig = { updated ->
+                prefs.updateCueConfig(updated)
+                app.remEngine.updateConfig(updated)
+            },
+            onDismiss = { showSensorDiagnostics = false }
         )
     }
 }
@@ -259,7 +357,8 @@ private fun DeviceStatusCard(
     deviceInfo: com.flashalarm.miband.domain.model.BleDeviceInfo,
     metrics: com.flashalarm.miband.domain.model.BleDeviceMetrics,
     onConnectClick: () -> Unit,
-    onConfigureClick: () -> Unit
+    onConfigureClick: () -> Unit,
+    onDisconnectClick: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -293,8 +392,8 @@ private fun DeviceStatusCard(
                         text = when (connectionState) {
                             BleConnectionState.CONNECTED -> "已连接小米手环 6"
                             BleConnectionState.CONNECTING -> "正在建立连接..."
-                            BleConnectionState.AUTHENTICATING -> "正在进行华米AES握手..."
-                            BleConnectionState.SCANNING -> "正在扫描附近手环..."
+                            BleConnectionState.AUTHENTICATING -> "正在进行Huami认证..."
+                            BleConnectionState.SCANNING -> "正在扫描手环..."
                             BleConnectionState.ERROR -> "连接断开/认证失败"
                             else -> "手环未连接"
                         },
@@ -305,7 +404,7 @@ private fun DeviceStatusCard(
                 }
 
                 Text(
-                    text = if (connectionState == BleConnectionState.CONNECTED) "已就绪" else "配置密钥",
+                    text = if (connectionState == BleConnectionState.CONNECTED) "已就绪" else "配对向导",
                     fontSize = 12.sp,
                     color = MiBandCyan,
                     modifier = Modifier.clickable { onConfigureClick() }
@@ -329,28 +428,53 @@ private fun DeviceStatusCard(
                     icon = R.drawable.ic_moon,
                     iconTint = MiBandCyan,
                     label = "手腕动量",
-                    value = if (metrics.actigraphyG > 0) "%.2fg".format(metrics.actigraphyG) else "静止"
+                    value = if (metrics.actigraphyG > 0) "%.3fg".format(metrics.actigraphyG) else "静止"
                 )
                 MetricItem(
                     icon = R.drawable.ic_bluetooth,
                     iconTint = AlertPurple,
-                    label = "MAC地址",
-                    value = if (deviceInfo.macAddress.isNotBlank()) deviceInfo.macAddress.takeLast(8) else "未设定"
+                    label = "手环MAC",
+                    value = if (deviceInfo.macAddress.isNotBlank()) deviceInfo.macAddress.takeLast(8) else "未配置"
                 )
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            if (connectionState != BleConnectionState.CONNECTED) {
-                Button(
-                    onClick = onConnectClick,
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (connectionState != BleConnectionState.CONNECTED) {
+                    Button(
+                        onClick = onConnectClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = MiBandCyan)
+                    ) {
+                        Text("连接手环", color = Color.Black, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onDisconnectClick,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("断开连接", color = DarkTextSecondary, fontSize = 13.sp)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = onConfigureClick,
                     modifier = Modifier
-                        .fillMaxWidth()
+                        .weight(1f)
                         .height(42.dp),
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.buttonColors(containerColor = DarkBorder)
+                    shape = RoundedCornerShape(10.dp)
                 ) {
-                    Text("连接手环", color = DarkTextPrimary, fontSize = 13.sp)
+                    Text("扫描/密钥设置", color = GoldDream, fontSize = 13.sp)
                 }
             }
         }
@@ -376,15 +500,20 @@ private fun MetricItem(
             Text(label, fontSize = 11.sp, color = DarkTextTertiary)
         }
         Spacer(modifier = Modifier.height(2.dp))
-        Text(value, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = DarkTextPrimary)
+        Text(value, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = DarkTextPrimary)
     }
 }
 
 @Composable
 private fun DreamCueConfigCard(
-    cueConfig: com.flashalarm.miband.domain.model.DreamCueConfig,
-    onConfigChange: (com.flashalarm.miband.domain.model.DreamCueConfig) -> Unit,
-    onTestVibration: () -> Unit
+    cueConfig: DreamCueConfig,
+    connectionState: BleConnectionState,
+    isTestingAudio: Boolean,
+    onConfigChange: (DreamCueConfig) -> Unit,
+    onOpenVibrationStudio: () -> Unit,
+    onPickAudioFile: () -> Unit,
+    onToggleAudioTest: () -> Unit,
+    onQuickTestVibration: () -> Unit
 ) {
     Card(
         modifier = Modifier
@@ -395,59 +524,93 @@ private fun DreamCueConfigCard(
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
             Text(
-                text = "黄金触梦提醒设置",
+                text = "黄金触梦提醒与通道定制",
                 fontSize = 16.sp,
                 fontWeight = FontWeight.Bold,
                 color = DarkTextPrimary
             )
             Text(
-                text = "命中做梦期时向手腕下发特定节奏微震，在梦中唤醒自知意识",
+                text = "手环震动与手机音频双通道可单独或组合开启，最长可调至5分钟",
                 fontSize = 12.sp,
                 color = DarkTextSecondary,
                 modifier = Modifier.padding(top = 2.dp, bottom = 12.dp)
             )
 
-            // Cadence selector
-            Text("微震节奏模式", fontSize = 13.sp, color = DarkTextTertiary)
-            Spacer(modifier = Modifier.height(6.dp))
-
-            VibrationCadenceType.entries.forEach { cadence ->
-                val isSelected = cueConfig.cadenceType == cadence
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(vertical = 4.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (isSelected) GoldDream.copy(alpha = 0.15f) else DarkSurface)
-                        .border(1.dp, if (isSelected) GoldDream else DarkBorder, RoundedCornerShape(10.dp))
-                        .clickable { onConfigChange(cueConfig.copy(cadenceType = cadence)) }
-                        .padding(horizontal = 12.dp, vertical = 10.dp)
-                ) {
+            // --- Channel 1: Wrist Motor Vibration ---
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(DarkSurface)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
+            ) {
+                Column {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column {
-                            Text(
-                                text = cadence.displayName,
-                                fontSize = 14.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) GoldDream else DarkTextPrimary
-                            )
-                            Text(
-                                text = cadence.patternDescription,
-                                fontSize = 11.sp,
-                                color = DarkTextTertiary
-                            )
-                        }
-                        if (isSelected) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(
-                                painter = painterResource(id = R.drawable.ic_star),
+                                painter = painterResource(id = R.drawable.ic_vibrate),
                                 contentDescription = null,
                                 tint = GoldDream,
-                                modifier = Modifier.size(16.dp)
+                                modifier = Modifier.size(18.dp)
                             )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("手环腕部脉冲微震", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        }
+
+                        Switch(
+                            checked = cueConfig.enableWristVibration,
+                            onCheckedChange = { onConfigChange(cueConfig.copy(enableWristVibration = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = GoldDream, checkedTrackColor = GoldDream.copy(alpha = 0.3f))
+                        )
+                    }
+
+                    if (cueConfig.enableWristVibration) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val activePattern = cueConfig.getActivePattern()
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Column {
+                                Text(
+                                    text = "当前模式: ${activePattern.name}",
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium,
+                                    color = GoldDream
+                                )
+                                Text(
+                                    text = "强度 ${activePattern.startIntensityPercent}%~${activePattern.endIntensityPercent}% | 时长 ${activePattern.durationSeconds}s",
+                                    fontSize = 11.sp,
+                                    color = DarkTextTertiary
+                                )
+                            }
+
+                            Text(
+                                text = "定制/重命名 >",
+                                fontSize = 12.sp,
+                                color = MiBandCyan,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier
+                                    .clickable { onOpenVibrationStudio() }
+                                    .padding(4.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        OutlinedButton(
+                            onClick = onQuickTestVibration,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text("手环试震一下", fontSize = 12.sp, color = GoldDream)
                         }
                     }
                 }
@@ -455,56 +618,159 @@ private fun DreamCueConfigCard(
 
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Test vibration button
-            Button(
-                onClick = onTestVibration,
+            // --- Channel 2: Phone Audio Playback ---
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(40.dp),
-                shape = RoundedCornerShape(10.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = DarkBorder)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(DarkSurface)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                    .padding(12.dp)
             ) {
-                Icon(
-                    painter = painterResource(id = R.drawable.ic_vibrate),
-                    contentDescription = null,
-                    tint = GoldDream,
-                    modifier = Modifier.size(16.dp)
-                )
-                Spacer(modifier = Modifier.width(6.dp))
-                Text("试听/测试手腕微震触感", color = GoldDream, fontSize = 13.sp)
+                Column {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                painter = painterResource(id = R.drawable.ic_music),
+                                contentDescription = null,
+                                tint = AlertPurple,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text("手机潜意识语音/音频", fontSize = 14.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        }
+
+                        Switch(
+                            checked = cueConfig.enableAudioPlayback,
+                            onCheckedChange = { onConfigChange(cueConfig.copy(enableAudioPlayback = it)) },
+                            colors = SwitchDefaults.colors(checkedThumbColor = AlertPurple, checkedTrackColor = AlertPurple.copy(alpha = 0.3f))
+                        )
+                    }
+
+                    if (cueConfig.enableAudioPlayback) {
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                text = cueConfig.customAudioName,
+                                fontSize = 12.sp,
+                                color = DarkTextPrimary,
+                                modifier = Modifier.weight(1f)
+                            )
+
+                            Text(
+                                text = "更换本地音频",
+                                fontSize = 12.sp,
+                                color = AlertPurple,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier
+                                    .clickable { onPickAudioFile() }
+                                    .padding(4.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        // Audio duration slider (5s - 300s / 5 minutes)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("音频播放时长", fontSize = 12.sp, color = DarkTextSecondary)
+                            val durText = if (cueConfig.audioDurationSeconds >= 60) {
+                                "${cueConfig.audioDurationSeconds / 60}分${cueConfig.audioDurationSeconds % 60}秒"
+                            } else {
+                                "${cueConfig.audioDurationSeconds}秒"
+                            }
+                            Text(durText, fontSize = 12.sp, color = AlertPurple, fontWeight = FontWeight.Bold)
+                        }
+                        Slider(
+                            value = cueConfig.audioDurationSeconds.toFloat(),
+                            onValueChange = { onConfigChange(cueConfig.copy(audioDurationSeconds = it.toInt())) },
+                            valueRange = 5f..300f,
+                            colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
+                        )
+
+                        // Audio volume slider (10% - 100%)
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text("音频播放音量", fontSize = 12.sp, color = DarkTextSecondary)
+                            Text("${cueConfig.audioVolumePercent}%", fontSize = 12.sp, color = AlertPurple, fontWeight = FontWeight.Bold)
+                        }
+                        Slider(
+                            value = cueConfig.audioVolumePercent.toFloat(),
+                            onValueChange = { onConfigChange(cueConfig.copy(audioVolumePercent = it.toInt())) },
+                            valueRange = 10f..100f,
+                            colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
+                        )
+
+                        Spacer(modifier = Modifier.height(4.dp))
+
+                        OutlinedButton(
+                            onClick = onToggleAudioTest,
+                            modifier = Modifier.fillMaxWidth(),
+                            shape = RoundedCornerShape(8.dp)
+                        ) {
+                            Text(
+                                text = if (isTestingAudio) "停止试听" else "试听潜意识音频",
+                                fontSize = 12.sp,
+                                color = AlertPurple
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
+
+            // --- Section 3: Sleep Segmentation & Relative Timing ---
+            Text("睡眠分段与相对时序", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text("入睡后深睡保护期时长", fontSize = 12.sp, color = DarkTextSecondary)
+                Text("%.1f 小时".format(cueConfig.sleepOnsetProtectionHours), fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+            }
+            Slider(
+                value = cueConfig.sleepOnsetProtectionHours,
+                onValueChange = { onConfigChange(cueConfig.copy(sleepOnsetProtectionHours = (it * 2).toInt() / 2.0f)) },
+                valueRange = 1.0f..4.5f,
+                steps = 6,
+                colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+            )
+            Text(
+                text = "💡 入睡识别后前 %.1f 小时保持静默，保护深度睡眠；保护期过后触梦雷达全程开启，直至手动结束。".format(cueConfig.sleepOnsetProtectionHours),
+                fontSize = 11.sp,
+                color = DarkTextTertiary,
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
 
             // Cooldown Interval
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Text("两次触梦最短冷却", fontSize = 13.sp, color = DarkTextPrimary)
-                Text("${cueConfig.cooldownMinutes} 分钟", fontSize = 13.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                Text("两次触梦最短冷却间隔", fontSize = 12.sp, color = DarkTextSecondary)
+                Text("${cueConfig.cooldownMinutes} 分钟", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
             }
             Slider(
                 value = cueConfig.cooldownMinutes.toFloat(),
                 onValueChange = { onConfigChange(cueConfig.copy(cooldownMinutes = it.toInt())) },
-                valueRange = 15f..45f,
-                steps = 5,
-                colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
-            )
-
-            // Sleep Onset Delay Window
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("入睡首周期深睡保护", fontSize = 13.sp, color = DarkTextPrimary)
-                Text("${cueConfig.minSleepOnsetMinutes} 分钟", fontSize = 13.sp, color = GoldDream, fontWeight = FontWeight.Bold)
-            }
-            Slider(
-                value = cueConfig.minSleepOnsetMinutes.toFloat(),
-                onValueChange = { onConfigChange(cueConfig.copy(minSleepOnsetMinutes = it.toInt())) },
-                valueRange = 60f..100f,
-                steps = 7,
+                valueRange = 10f..60f,
+                steps = 9,
                 colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
             )
 
@@ -518,7 +784,7 @@ private fun DreamCueConfigCard(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text("手机麦克风呼吸交叉验证 (25%)", fontSize = 13.sp, color = DarkTextPrimary)
-                    Text("若关闭或嘈杂，将自动平滑降级为纯手环双通道", fontSize = 11.sp, color = DarkTextTertiary)
+                    Text("结合后半夜呼吸变浅变乱双重印证", fontSize = 11.sp, color = DarkTextTertiary)
                 }
                 Switch(
                     checked = cueConfig.enableAudioVerification,
@@ -541,23 +807,23 @@ private fun AlgorithmOverviewCard() {
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
             Text(
-                text = "双保险多模态分层决策逻辑",
+                text = "多模态 REM 触梦分期逻辑",
                 fontSize = 15.sp,
                 fontWeight = FontWeight.Bold,
                 color = DarkTextPrimary
             )
             Spacer(modifier = Modifier.height(8.dp))
             AlgorithmBullet(
-                title = "75% 手环生理骨架",
-                desc = "骨骼肌瘫痪（翻身动作一票否决）+ 自主神经风暴（心率突增15%+与变异度剧烈跳变）"
+                title = "Cole-Kripke 入睡状态机",
+                desc = "自动跟踪入睡时的连续静止与心率沉降，相对锁定深睡保护期与做梦期"
             )
             AlgorithmBullet(
-                title = "25% 手机声学印证",
-                desc = "后半夜呼吸变浅变乱双重印证，置信度达95%+击发微震"
+                title = "75% 手环生理多模态骨架",
+                desc = "骨骼肌瘫痪（翻身动作一票否决）+ 自主神经风暴（心率突增与HRV离散跳变）"
             )
             AlgorithmBullet(
-                title = "睡眠周期硬约束",
-                desc = "入睡70-90分钟后及凌晨高发期开放，彻底杜绝前半夜深睡误击发"
+                title = "25% 手机夜间呼吸声学印证",
+                desc = "后半夜呼吸不规则度交叉验证，置信度达标后精准下发腕部微震或潜意识耳语"
             )
         }
     }
@@ -569,67 +835,4 @@ private fun AlgorithmBullet(title: String, desc: String) {
         Text("• $title", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MiBandCyan)
         Text(desc, fontSize = 12.sp, color = DarkTextSecondary, modifier = Modifier.padding(start = 12.dp))
     }
-}
-
-@Composable
-private fun DeviceConfigDialog(
-    currentMac: String,
-    currentKey: String,
-    onDismiss: () -> Unit,
-    onSave: (mac: String, authKey: String) -> Unit
-) {
-    var macText by remember { mutableStateOf(currentMac) }
-    var keyText by remember { mutableStateOf(currentKey) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        containerColor = DarkSurfaceElevated,
-        title = { Text("小米手环 6 握手配置", color = DarkTextPrimary, fontWeight = FontWeight.Bold) },
-        text = {
-            Column {
-                Text(
-                    text = "小米手环 6 采用标准华米 AES-128 协议，需 16 字节 Auth Key（32位十六进制字符，如通过 Zepp/Gadgetbridge 获取）完成随机数加密握手。",
-                    fontSize = 12.sp,
-                    color = DarkTextSecondary
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                OutlinedTextField(
-                    value = macText,
-                    onValueChange = { macText = it },
-                    label = { Text("手环 MAC 地址 (例如 E4:24:D7:xx:xx:xx)") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = DarkTextPrimary,
-                        unfocusedTextColor = DarkTextPrimary
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Spacer(modifier = Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = keyText,
-                    onValueChange = { keyText = it },
-                    label = { Text("16 字节 Auth Key (32 位 Hex)") },
-                    singleLine = true,
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = DarkTextPrimary,
-                        unfocusedTextColor = DarkTextPrimary
-                    ),
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        },
-        confirmButton = {
-            Button(
-                onClick = { onSave(macText, keyText) },
-                colors = ButtonDefaults.buttonColors(containerColor = GoldDream)
-            ) {
-                Text("保存设置", color = Color.Black)
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("取消", color = DarkTextTertiary)
-            }
-        }
-    )
 }
