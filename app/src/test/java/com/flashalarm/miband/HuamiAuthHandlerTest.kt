@@ -54,7 +54,7 @@ class HuamiAuthHandlerTest {
         val sendPacket = (result as AuthResult.SendPacket).data
         assertEquals(18, sendPacket.size)
         assertEquals(0x03.toByte(), sendPacket[0])
-        assertEquals(0x08.toByte(), sendPacket[1])
+        assertEquals(0x00.toByte(), sendPacket[1])
         assertEquals(HuamiAuthHandler.Step.WAITING_CONFIRMATION, authHandler.currentStep)
     }
 
@@ -67,5 +67,13 @@ class HuamiAuthHandlerTest {
 
         assertEquals(AuthResult.Success, result)
         assertEquals(HuamiAuthHandler.Step.AUTHENTICATED, authHandler.currentStep)
+    }
+
+    @Test
+    fun `test authKey sanitization with 0x prefix, spaces and hyphens`() {
+        val testKeyWithPrefixAndSpaces = "0x 01 23 45 67 - 89 AB CD EF - 01 23 45 67 - 89 ab cd ef"
+        val handler = HuamiAuthHandler()
+        val success = handler.setAuthKeyHex(testKeyWithPrefixAndSpaces)
+        assertTrue("Sanitized auth key should parse successfully", success)
     }
 }

@@ -8,6 +8,7 @@ import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
 import android.bluetooth.BluetoothGattDescriptor
 import android.bluetooth.BluetoothProfile
+import android.bluetooth.BluetoothStatusCodes
 import android.bluetooth.le.ScanCallback
 import android.bluetooth.le.ScanResult
 import android.content.Context
@@ -47,6 +48,7 @@ class MiBandBleManager(
 ) {
     companion object {
         private const val TAG = "MiBandBleManager"
+        private const val AUTH_TIMEOUT_MS = 15000L
     }
 
     private val bluetoothAdapter: BluetoothAdapter? by lazy {
@@ -57,9 +59,12 @@ class MiBandBleManager(
     private var bluetoothGatt: BluetoothGatt? = null
     private val authHandler = HuamiAuthHandler()
 
-    // State flows
+    // Connection state flows
     private val _connectionState = MutableStateFlow(BleConnectionState.DISCONNECTED)
     val connectionState: StateFlow<BleConnectionState> = _connectionState.asStateFlow()
+
+    private val _authStatusDetail = MutableStateFlow("手环未连接")
+    val authStatusDetail: StateFlow<String> = _authStatusDetail.asStateFlow()
 
     private val _deviceMetrics = MutableStateFlow(BleDeviceMetrics())
     val deviceMetrics: StateFlow<BleDeviceMetrics> = _deviceMetrics.asStateFlow()
@@ -76,6 +81,7 @@ class MiBandBleManager(
 
     private var activeScanCallback: ScanCallback? = null
     private var scanTimeoutJob: Job? = null
+    private var authTimeoutJob: Job? = null
 
     // Event streams
     private val _heartRateFlow = MutableSharedFlow<Int>(extraBufferCapacity = 64)
@@ -89,12 +95,18 @@ class MiBandBleManager(
     private var isVibrating = false
 
     fun setTargetDevice(name: String, mac: String, authKeyHex: String) {
+        val cleanKey = authKeyHex.trim()
+            .replace(":", "")
+            .replace(" ", "")
+            .replace("-", "")
+            .let { if (it.startsWith("0x", ignoreCase = true)) it.substring(2) else it }
+
         _deviceInfo.value = BleDeviceInfo(
             name = name.ifBlank { "Mi Smart Band 6" },
             macAddress = mac.uppercase().trim(),
-            authKeyHex = authKeyHex.trim()
+            authKeyHex = cleanKey
         )
-        authHandler.setAuthKeyHex(authKeyHex)
+        authHandler.setAuthKeyHex(cleanKey)
     }
 
     /**
@@ -153,7 +165,6 @@ class MiBandBleManager(
             _isScanning.value = false
         }
 
-        // Auto-stop scan after 15 seconds
         scanTimeoutJob?.cancel()
         scanTimeoutJob = scope.launch(Dispatchers.Main) {
             delay(15000L)
@@ -178,11 +189,13 @@ class MiBandBleManager(
     fun startScanAndConnect(targetMac: String = _deviceInfo.value.macAddress) {
         val adapter = bluetoothAdapter ?: run {
             _connectionState.value = BleConnectionState.ERROR
+            _authStatusDetail.value = "蓝牙适配器不可用"
             return
         }
 
         if (!adapter.isEnabled) {
             _connectionState.value = BleConnectionState.DISCONNECTED
+            _authStatusDetail.value = "蓝牙处于关闭状态，请先开启手机蓝牙"
             return
         }
 
@@ -204,6 +217,8 @@ class MiBandBleManager(
         }
 
         _connectionState.value = BleConnectionState.SCANNING
+        _authStatusDetail.value = "正在扫描匹配手环..."
+
         val scanCallback = object : ScanCallback() {
             override fun onScanResult(callbackType: Int, result: ScanResult?) {
                 val dev = result?.device ?: return
@@ -234,6 +249,7 @@ class MiBandBleManager(
             override fun onScanFailed(errorCode: Int) {
                 Log.e(TAG, "Scan failed with error code: $errorCode")
                 _connectionState.value = BleConnectionState.ERROR
+                _authStatusDetail.value = "扫描失败 (错误码: $errorCode)"
             }
         }
 
@@ -243,11 +259,14 @@ class MiBandBleManager(
     fun connectToDevice(device: BluetoothDevice) {
         disconnect()
         _connectionState.value = BleConnectionState.CONNECTING
+        _authStatusDetail.value = "正在建立低功耗蓝牙物理链路..."
         Log.i(TAG, "Connecting to GATT device: ${device.address}")
         bluetoothGatt = device.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
     }
 
     fun disconnect() {
+        authTimeoutJob?.cancel()
+        authTimeoutJob = null
         hrKeepAliveJob?.cancel()
         hrKeepAliveJob = null
         stopVibration()
@@ -262,13 +281,16 @@ class MiBandBleManager(
         }
         bluetoothGatt = null
         _connectionState.value = BleConnectionState.DISCONNECTED
+        _authStatusDetail.value = "手环未连接"
     }
 
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
             Log.d(TAG, "onConnectionStateChange status=$status, newState=$newState")
             if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "Connection failed with status: $status")
                 _connectionState.value = BleConnectionState.ERROR
+                _authStatusDetail.value = "GATT连接异常 (状态码: $status)，请重试"
                 disconnect()
                 return
             }
@@ -276,44 +298,118 @@ class MiBandBleManager(
             when (newState) {
                 BluetoothProfile.STATE_CONNECTED -> {
                     _connectionState.value = BleConnectionState.AUTHENTICATING
-                    gatt?.requestMtu(512)
+                    _authStatusDetail.value = "蓝牙链路已连通，准备发现服务..."
+                    Log.i(TAG, "Connected to GATT server. Scheduling service discovery...")
+
+                    // 15-second safety timeout for authentication
+                    authTimeoutJob?.cancel()
+                    authTimeoutJob = scope.launch(Dispatchers.Main) {
+                        delay(AUTH_TIMEOUT_MS)
+                        if (_connectionState.value == BleConnectionState.AUTHENTICATING) {
+                            Log.e(TAG, "Huami authentication timed out after ${AUTH_TIMEOUT_MS}ms")
+                            _authStatusDetail.value = "认证超时：手环未响应握手。请点亮手环屏幕，或重新核对AuthKey"
+                            _connectionState.value = BleConnectionState.ERROR
+                        }
+                    }
+
+                    // Delay 300ms before discoverServices() as recommended by Android BLE best practices
+                    scope.launch(Dispatchers.Main) {
+                        delay(300L)
+                        _authStatusDetail.value = "正在检索手环GATT服务列表..."
+                        val discoverSuccess = gatt?.discoverServices() ?: false
+                        if (!discoverSuccess) {
+                            Log.e(TAG, "discoverServices returned false")
+                            _authStatusDetail.value = "启动服务发现失败"
+                            _connectionState.value = BleConnectionState.ERROR
+                        }
+                    }
                 }
                 BluetoothProfile.STATE_DISCONNECTED -> {
                     _connectionState.value = BleConnectionState.DISCONNECTED
+                    _authStatusDetail.value = "手环蓝牙已断开"
                     disconnect()
                 }
             }
         }
 
-        override fun onMtuChanged(gatt: BluetoothGatt?, mtu: Int, status: Int) {
-            Log.d(TAG, "MTU changed to $mtu, discovering services...")
-            gatt?.discoverServices()
-        }
-
         override fun onServicesDiscovered(gatt: BluetoothGatt?, status: Int) {
             if (status != BluetoothGatt.GATT_SUCCESS || gatt == null) {
+                Log.e(TAG, "onServicesDiscovered failed with status: $status")
                 _connectionState.value = BleConnectionState.ERROR
+                _authStatusDetail.value = "服务发现失败 (状态码: $status)"
                 return
             }
 
-            Log.i(TAG, "Services discovered. Starting Huami Auth Handshake...")
-            startAuthHandshake(gatt)
+            Log.i(TAG, "Services discovered. Searching for Huami Auth characteristic (0x0009)...")
+            _authStatusDetail.value = "已发现服务，正在检索华米认证特征..."
+
+            // Search in standard Huami Auth service (0xFEE1) or any discovered service
+            var authChar: BluetoothGattCharacteristic? = null
+            val authService = gatt.getService(BleConstants.UUID_SERVICE_AUTH)
+            if (authService != null) {
+                authChar = authService.getCharacteristic(BleConstants.UUID_CHAR_AUTH)
+            }
+            if (authChar == null) {
+                for (s in gatt.services) {
+                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_AUTH)
+                    if (c != null) {
+                        authChar = c
+                        break
+                    }
+                }
+            }
+
+            if (authChar != null) {
+                Log.i(TAG, "Huami Auth characteristic found! Enabling notification/indication...")
+                _authStatusDetail.value = "已找到认证特征，正在配置安全通道..."
+                enableNotification(gatt, authChar)
+            } else {
+                Log.e(TAG, "Huami Auth characteristic (00000009) not found on device!")
+                _connectionState.value = BleConnectionState.ERROR
+                _authStatusDetail.value = "未找到华米认证特征通道 (0x0009)"
+            }
         }
 
         override fun onDescriptorWrite(gatt: BluetoothGatt?, descriptor: BluetoothGattDescriptor?, status: Int) {
             val charUuid = descriptor?.characteristic?.uuid
             Log.d(TAG, "Descriptor written for $charUuid, status=$status")
 
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.e(TAG, "Failed writing descriptor for $charUuid, status=$status")
+                _authStatusDetail.value = "配置安全通道描述符失败 (状态码: $status)"
+                _connectionState.value = BleConnectionState.ERROR
+                return
+            }
+
             if (charUuid == BleConstants.UUID_CHAR_AUTH) {
-                // Send first handshake packet: request random challenge
-                val requestPacket = authHandler.startHandshake()
-                writeCharacteristic(BleConstants.UUID_SERVICE_AUTH, BleConstants.UUID_CHAR_AUTH, requestPacket)
+                // Dispatch with slight delay so the GATT stack transitions out of GATT_BUSY state!
+                scope.launch(Dispatchers.IO) {
+                    delay(150L)
+                    val requestPacket = authHandler.startHandshake(legacy = false)
+                    Log.i(TAG, "Writing request random challenge packet: ${requestPacket.joinToString(separator = " ") { "%02X".format(it) }}")
+                    _authStatusDetail.value = "安全通道就绪，已发送0x02请求，等待手环Challenge..."
+                    val writeSuccess = writeCharacteristic(BleConstants.UUID_SERVICE_AUTH, BleConstants.UUID_CHAR_AUTH, requestPacket)
+                    if (!writeSuccess) {
+                        Log.e(TAG, "Failed sending random challenge request packet")
+                        _authStatusDetail.value = "发送0x02随机数请求失败，请重试"
+                        _connectionState.value = BleConnectionState.ERROR
+                    }
+                }
             } else if (charUuid == BleConstants.UUID_CHAR_HEART_RATE_MEASUREMENT) {
-                // Start continuous HR
-                writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
-                startHrKeepAlive()
-                // Now enable sensor actigraphy
-                gatt?.let { enableSensorNotifications(it) }
+                scope.launch(Dispatchers.IO) {
+                    delay(150L)
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+                    startHrKeepAlive()
+                    delay(150L)
+                    gatt?.let { enableSensorNotifications(it) }
+                }
+            }
+        }
+
+        override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
+            Log.d(TAG, "onCharacteristicWrite uuid=${characteristic?.uuid}, status=$status")
+            if (status != BluetoothGatt.GATT_SUCCESS) {
+                Log.w(TAG, "Characteristic write not SUCCESS: status=$status")
             }
         }
 
@@ -333,19 +429,52 @@ class MiBandBleManager(
     private fun handleCharacteristicData(uuid: UUID, value: ByteArray) {
         when (uuid) {
             BleConstants.UUID_CHAR_AUTH -> {
+                val hexStr = value.joinToString(separator = " ") { "%02X".format(it) }
+                Log.i(TAG, "Received AUTH characteristic update: [$hexStr]")
+
                 when (val result = authHandler.handleAuthNotification(value)) {
                     is AuthResult.SendPacket -> {
-                        Log.d(TAG, "Sending encrypted auth challenge response")
-                        writeCharacteristic(BleConstants.UUID_SERVICE_AUTH, BleConstants.UUID_CHAR_AUTH, result.data)
+                        val packetHex = result.data.joinToString(separator = " ") { "%02X".format(it) }
+                        if (result.data.isNotEmpty() && result.data[0] == BleConstants.AUTH_BYTE_PAIR_OP) {
+                            _authStatusDetail.value = "手环提示：请轻触手环屏幕确认配对..."
+                        } else {
+                            _authStatusDetail.value = "已获取Challenge，正在进行AES运算并回传密文..."
+                        }
+
+                        scope.launch(Dispatchers.IO) {
+                            delay(100L)
+                            Log.d(TAG, "Sending auth packet to band: [$packetHex]")
+                            val success = writeCharacteristic(BleConstants.UUID_SERVICE_AUTH, BleConstants.UUID_CHAR_AUTH, result.data)
+                            if (!success) {
+                                Log.e(TAG, "Failed writing auth packet [$packetHex]")
+                                _authStatusDetail.value = "发送认证密文失败"
+                                _connectionState.value = BleConnectionState.ERROR
+                            }
+                        }
                     }
+
                     is AuthResult.Success -> {
-                        Log.i(TAG, "Huami authentication SUCCESSFUL! Mi Band 6 is ready.")
+                        Log.i(TAG, "Huami authentication SUCCESSFUL! Mi Band 6 is authenticated and ready.")
+                        authTimeoutJob?.cancel()
+                        authTimeoutJob = null
+                        _authStatusDetail.value = "华米握手认证成功！手环已就绪"
                         _connectionState.value = BleConnectionState.CONNECTED
-                        // Start sensor data subscriptions
-                        bluetoothGatt?.let { subscribeHeartRate(it) }
+
+                        // Request MTU now after auth to optimize sensor data throughput
+                        bluetoothGatt?.requestMtu(512)
+
+                        // Start heart rate & actigraphy sensor data subscriptions
+                        scope.launch(Dispatchers.IO) {
+                            delay(250L)
+                            bluetoothGatt?.let { subscribeHeartRate(it) }
+                        }
                     }
+
                     is AuthResult.Failed -> {
                         Log.e(TAG, "Huami authentication failed: ${result.error}")
+                        authTimeoutJob?.cancel()
+                        authTimeoutJob = null
+                        _authStatusDetail.value = result.error
                         _connectionState.value = BleConnectionState.ERROR
                     }
                 }
@@ -375,17 +504,6 @@ class MiBandBleManager(
             BleConstants.UUID_CHAR_SENSOR_DATA -> {
                 parseActigraphyData(value)
             }
-        }
-    }
-
-    private fun startAuthHandshake(gatt: BluetoothGatt) {
-        val authService = gatt.getService(BleConstants.UUID_SERVICE_AUTH)
-        val authChar = authService?.getCharacteristic(BleConstants.UUID_CHAR_AUTH)
-        if (authChar != null) {
-            enableNotification(gatt, authChar)
-        } else {
-            Log.e(TAG, "Auth characteristic not found on device!")
-            _connectionState.value = BleConnectionState.ERROR
         }
     }
 
@@ -445,15 +563,12 @@ class MiBandBleManager(
         hrKeepAliveJob?.cancel()
         hrKeepAliveJob = scope.launch(Dispatchers.IO) {
             while (isActive && _connectionState.value == BleConnectionState.CONNECTED) {
-                delay(12000L) // 12-second ping keepalive
+                delay(12000L)
                 writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_PING_KEEPALIVE)
             }
         }
     }
 
-    /**
-     * Switch heart rate sampling between continuous 1Hz stream and periodic power-saving mode.
-     */
     fun setHeartRateStreamingMode(isContinuous: Boolean) {
         if (isContinuous) {
             writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
@@ -469,24 +584,64 @@ class MiBandBleManager(
         gatt.setCharacteristicNotification(characteristic, true)
         val descriptor = characteristic.getDescriptor(BleConstants.UUID_DESCRIPTOR_CCCD)
         if (descriptor != null) {
+            val cccdValue = if ((characteristic.properties and BluetoothGattCharacteristic.PROPERTY_INDICATE) != 0) {
+                BluetoothGattDescriptor.ENABLE_INDICATION_VALUE
+            } else {
+                BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+            }
+
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                gatt.writeDescriptor(descriptor, BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE)
+                gatt.writeDescriptor(descriptor, cccdValue)
             } else {
                 @Suppress("DEPRECATION")
-                descriptor.value = BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE
+                descriptor.value = cccdValue
                 @Suppress("DEPRECATION")
                 gatt.writeDescriptor(descriptor)
             }
         }
     }
 
-    fun writeCharacteristic(serviceUuid: UUID, charUuid: UUID, data: ByteArray) {
-        val gatt = bluetoothGatt ?: return
-        val service = gatt.getService(serviceUuid) ?: return
-        val char = service.getCharacteristic(charUuid) ?: return
+    fun writeCharacteristic(serviceUuid: UUID, charUuid: UUID, data: ByteArray): Boolean {
+        val gatt = bluetoothGatt ?: run {
+            Log.w(TAG, "writeCharacteristic failed: bluetoothGatt is null")
+            return false
+        }
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT)
+        var service = gatt.getService(serviceUuid)
+        var char = service?.getCharacteristic(charUuid)
+
+        if (char == null) {
+            for (s in gatt.services) {
+                val c = s.getCharacteristic(charUuid)
+                if (c != null) {
+                    char = c
+                    service = s
+                    break
+                }
+            }
+        }
+
+        if (char == null) {
+            Log.w(TAG, "writeCharacteristic failed: characteristic $charUuid not found on device")
+            return false
+        }
+
+        val writeType = when {
+            (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0 -> {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            }
+            (char.properties and BluetoothGattCharacteristic.PROPERTY_WRITE_NO_RESPONSE) != 0 -> {
+                BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            }
+            else -> {
+                BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+            }
+        }
+        char.writeType = writeType
+
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeCharacteristic(char, data, writeType)
+            status == BluetoothStatusCodes.SUCCESS
         } else {
             @Suppress("DEPRECATION")
             char.value = data
@@ -495,10 +650,6 @@ class MiBandBleManager(
         }
     }
 
-    /**
-     * Software PWM pulse-modulated vibration engine.
-     * Supports continuous intensity slider (10% - 100%), crescendo, decrescendo, and custom patterns.
-     */
     fun triggerCustomVibration(
         pattern: CustomizableVibrationPattern,
         onComplete: (() -> Unit)? = null
@@ -530,24 +681,19 @@ class MiBandBleManager(
                         }
                     }.coerceIn(10, 100)
 
-                    // Duty cycle calculation:
-                    // Alert level 0x01 (Mild) for <= 50%, Alert level 0x02 (Strong) for > 50%
                     val alertLevel = if (currentIntensity > 50) 0x02 else 0x01
                     val dutyCycle = (currentIntensity / 100f).coerceIn(0.15f, 1.0f)
                     val onTimeMs = (pattern.pulseMs * dutyCycle).toLong().coerceAtLeast(30L)
                     val offTimeMs = (pattern.pulseMs - onTimeMs).coerceAtLeast(0L)
 
-                    // Pulse ON
                     writeAlertLevel(alertLevel)
                     delay(onTimeMs)
 
-                    // Pulse OFF
                     writeAlertLevel(0x00)
                     if (offTimeMs > 0L) {
                         delay(offTimeMs)
                     }
 
-                    // Special rhythmic handling for heartbeat (lub-dub)
                     if (pattern.type == PatternType.HEARTBEAT) {
                         delay(80L)
                         writeAlertLevel(0x01)
@@ -555,7 +701,6 @@ class MiBandBleManager(
                         writeAlertLevel(0x00)
                     }
 
-                    // Rest period between beats
                     delay(pattern.pauseMs.toLong().coerceAtLeast(50L))
                 }
             } catch (e: Exception) {
@@ -568,9 +713,6 @@ class MiBandBleManager(
         }
     }
 
-    /**
-     * Backward-compatible trigger for legacy cadence types.
-     */
     fun triggerCadenceVibration(cadenceType: VibrationCadenceType) {
         val pattern = VibrationCadenceProfiles.getPattern(cadenceType)
         vibrationJob?.cancel()

@@ -1,5 +1,6 @@
 package com.flashalarm.miband.data.ble
 
+import android.util.Log
 import java.security.InvalidKeyException
 import java.security.NoSuchAlgorithmException
 import javax.crypto.BadPaddingException
@@ -17,8 +18,13 @@ sealed class AuthResult {
 class HuamiAuthHandler(
     private var authKeyBytes: ByteArray = ByteArray(16)
 ) {
+    companion object {
+        private const val TAG = "HuamiAuthHandler"
+    }
+
     enum class Step {
         IDLE,
+        WAITING_PAIR_CONFIRM,
         WAITING_CHALLENGE,
         WAITING_CONFIRMATION,
         AUTHENTICATED,
@@ -28,9 +34,21 @@ class HuamiAuthHandler(
     var currentStep: Step = Step.IDLE
         private set
 
+    var currentModeFlag: Byte = 0x00
+        private set
+
     fun setAuthKeyHex(hexKey: String): Boolean {
-        val cleanKey = hexKey.trim().replace(":", "").replace(" ", "")
-        if (cleanKey.length != 32) return false
+        var cleanKey = hexKey.trim()
+            .replace(":", "")
+            .replace(" ", "")
+            .replace("-", "")
+        if (cleanKey.startsWith("0x", ignoreCase = true)) {
+            cleanKey = cleanKey.substring(2)
+        }
+        if (cleanKey.length != 32) {
+            Log.e(TAG, "AuthKey length is ${cleanKey.length}, expected 32 hex chars (16 bytes)")
+            return false
+        }
         return try {
             val bytes = ByteArray(16)
             for (i in 0 until 16) {
@@ -38,78 +56,114 @@ class HuamiAuthHandler(
                 bytes[i] = byteVal.toByte()
             }
             this.authKeyBytes = bytes
+            Log.i(TAG, "AuthKey successfully parsed into 16 bytes")
             true
         } catch (e: Exception) {
+            Log.e(TAG, "Failed parsing authKey hex string", e)
             false
         }
     }
 
-    fun startHandshake(): ByteArray {
+    fun startHandshake(legacy: Boolean = false): ByteArray {
         currentStep = Step.WAITING_CHALLENGE
-        // Request random challenge
-        return BleConstants.AUTH_CMD_REQUEST_RANDOM
+        currentModeFlag = if (legacy) 0x08 else 0x00
+        Log.i(TAG, "Starting auth handshake with mode flag 0x%02X".format(currentModeFlag))
+        return byteArrayOf(BleConstants.AUTH_BYTE_RANDOM_KEY_OP, currentModeFlag)
+    }
+
+    fun startPairing(legacy: Boolean = false): ByteArray {
+        currentStep = Step.WAITING_PAIR_CONFIRM
+        currentModeFlag = if (legacy) 0x08 else 0x00
+        Log.i(TAG, "Sending pairing key to band with flag 0x%02X".format(currentModeFlag))
+        val packet = ByteArray(18)
+        packet[0] = BleConstants.AUTH_BYTE_PAIR_OP
+        packet[1] = currentModeFlag
+        System.arraycopy(authKeyBytes, 0, packet, 2, 16)
+        return packet
     }
 
     fun handleAuthNotification(value: ByteArray?): AuthResult {
         if (value == null || value.isEmpty()) {
             currentStep = Step.FAILED
-            return AuthResult.Failed("Empty response from auth characteristic")
+            return AuthResult.Failed("手环返回认证数据为空")
         }
 
-        // Response format from Mi Band 6:
-        // [0x10, OpCode, Status, ... Payload ...]
+        val hexStr = value.joinToString(separator = " ") { "%02X".format(it) }
+        Log.i(TAG, "handleAuthNotification: [$hexStr], currentStep=$currentStep")
+
         if (value.size < 3 || value[0] != BleConstants.AUTH_BYTE_RESPONSE_PREFIX) {
             currentStep = Step.FAILED
-            return AuthResult.Failed("Malformed auth notification header: ${value.joinToString { "%02X".format(it) }}")
+            return AuthResult.Failed("手环返回报文非标准Auth响应: [$hexStr]")
         }
 
         val opCode = value[1]
         val status = value[2]
 
         when (opCode) {
-            BleConstants.AUTH_BYTE_RANDOM_KEY_OP -> {
+            BleConstants.AUTH_BYTE_PAIR_OP -> { // 0x01
+                if (status == BleConstants.AUTH_BYTE_SUCCESS) {
+                    Log.i(TAG, "User tapped screen! Pairing accepted. Proceeding to random challenge...")
+                    currentStep = Step.WAITING_CHALLENGE
+                    return AuthResult.SendPacket(byteArrayOf(BleConstants.AUTH_BYTE_RANDOM_KEY_OP, currentModeFlag))
+                } else {
+                    currentStep = Step.FAILED
+                    return AuthResult.Failed("手环屏幕配对未确认或被取消 (状态码: $status)")
+                }
+            }
+
+            BleConstants.AUTH_BYTE_RANDOM_KEY_OP -> { // 0x02
+                if (status == BleConstants.AUTH_BYTE_FAIL_NOT_PAIRED || status == BleConstants.AUTH_BYTE_FAIL_INVALID_KEY) {
+                    Log.w(TAG, "Band returned not paired status $status. Triggering pairing key registration...")
+                    return AuthResult.SendPacket(startPairing(currentModeFlag == 0x08.toByte()))
+                }
+
                 if (status != BleConstants.AUTH_BYTE_SUCCESS) {
                     currentStep = Step.FAILED
-                    return AuthResult.Failed("Failed to request random challenge from band, status = $status")
+                    return AuthResult.Failed("手环拒绝随机Challenge请求 (状态码: $status)")
                 }
+
                 if (value.size < 19) {
                     currentStep = Step.FAILED
-                    return AuthResult.Failed("Random challenge payload too short: ${value.size} bytes")
+                    return AuthResult.Failed("随机Challenge载荷长度不足: ${value.size} 字节")
                 }
 
                 // Extract 16 bytes random challenge (bytes 3..18)
                 val challenge = ByteArray(16)
                 System.arraycopy(value, 3, challenge, 0, 16)
+                Log.d(TAG, "Challenge received: ${challenge.joinToString(separator = "") { "%02X".format(it) }}")
 
                 // Encrypt challenge with 16-byte AuthKey using AES/ECB/NoPadding
                 val encrypted = encryptAes128(challenge, authKeyBytes)
                     ?: run {
                         currentStep = Step.FAILED
-                        return AuthResult.Failed("AES encryption calculation failed")
+                        return AuthResult.Failed("AES-128加密运算失败")
                     }
 
-                // Send response packet: [0x03, 0x08] + encrypted 16 bytes
+                // Send response packet: [0x03, currentModeFlag] + encrypted 16 bytes
                 val responsePacket = ByteArray(18)
                 responsePacket[0] = BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP
-                responsePacket[1] = 0x08
+                responsePacket[1] = currentModeFlag
                 System.arraycopy(encrypted, 0, responsePacket, 2, 16)
 
                 currentStep = Step.WAITING_CONFIRMATION
+                Log.i(TAG, "Sending encrypted challenge response [18 bytes]")
                 return AuthResult.SendPacket(responsePacket)
             }
 
-            BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP -> {
+            BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP -> { // 0x03
                 return if (status == BleConstants.AUTH_BYTE_SUCCESS) {
                     currentStep = Step.AUTHENTICATED
+                    Log.i(TAG, "Huami authentication handshake completed with SUCCESS!")
                     AuthResult.Success
                 } else {
                     currentStep = Step.FAILED
-                    AuthResult.Failed("Authentication handshake rejected by Mi Band 6 (Status: $status). Check AuthKey!")
+                    AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status)。请核验AuthKey是否对应此手环MAC！")
                 }
             }
 
             else -> {
-                return AuthResult.Failed("Unexpected auth opCode: $opCode")
+                Log.w(TAG, "Unhandled auth opCode: $opCode")
+                return AuthResult.Failed("未知认证OpCode: $opCode")
             }
         }
     }
@@ -122,6 +176,7 @@ class HuamiAuthHandler(
                 cipher.init(Cipher.ENCRYPT_MODE, secretKey)
                 cipher.doFinal(input)
             } catch (e: Exception) {
+                Log.e(TAG, "AES encryption error", e)
                 null
             }
         }

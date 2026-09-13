@@ -75,6 +75,7 @@ fun DevicePairingDialog(
     val isScanning by bleManager.isScanning.collectAsState()
     val discoveredDevices by bleManager.discoveredDevices.collectAsState()
     val connectionState by bleManager.connectionState.collectAsState()
+    val authStatusDetail by bleManager.authStatusDetail.collectAsState()
 
     var selectedMac by remember { mutableStateOf(initialMac) }
     var selectedName by remember { mutableStateOf("Mi Smart Band 6") }
@@ -314,19 +315,52 @@ fun DevicePairingDialog(
                     )
                 }
 
-                // Current Connection state pill
-                if (connectionState != BleConnectionState.DISCONNECTED) {
+                // Current Connection state card
+                if (connectionState != BleConnectionState.DISCONNECTED || (authStatusDetail.isNotBlank() && authStatusDetail != "手环未连接")) {
                     Spacer(modifier = Modifier.height(10.dp))
-                    Text(
-                        text = "状态: ${connectionState.displayName}",
-                        fontSize = 12.sp,
-                        color = when (connectionState) {
-                            BleConnectionState.CONNECTED -> GoldDream
-                            BleConnectionState.ERROR -> HeartRateRed
-                            else -> MiBandCyan
-                        },
-                        fontWeight = FontWeight.Medium
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkSurfaceElevated)
+                            .border(1.dp, DarkBorder, RoundedCornerShape(8.dp))
+                            .padding(10.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Box(
+                                modifier = Modifier
+                                    .size(8.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when (connectionState) {
+                                            BleConnectionState.CONNECTED -> GoldDream
+                                            BleConnectionState.ERROR -> HeartRateRed
+                                            else -> MiBandCyan
+                                        }
+                                    )
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Text(
+                                text = connectionState.displayName,
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = when (connectionState) {
+                                    BleConnectionState.CONNECTED -> GoldDream
+                                    BleConnectionState.ERROR -> HeartRateRed
+                                    else -> MiBandCyan
+                                }
+                            )
+                        }
+
+                        if (authStatusDetail.isNotBlank() && authStatusDetail != "手环未连接") {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = authStatusDetail,
+                                fontSize = 11.sp,
+                                color = if (connectionState == BleConnectionState.ERROR) HeartRateRed else DarkTextSecondary
+                            )
+                        }
+                    }
                 }
             }
         },

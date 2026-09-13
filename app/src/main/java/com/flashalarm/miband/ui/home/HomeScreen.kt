@@ -86,6 +86,7 @@ fun HomeScreen(
     val connectionState by bleManager.connectionState.collectAsState()
     val deviceMetrics by bleManager.deviceMetrics.collectAsState()
     val deviceInfo by bleManager.deviceInfo.collectAsState()
+    val authStatusDetail by bleManager.authStatusDetail.collectAsState()
     val cueConfig by prefs.cueConfig.collectAsState()
     val isServiceRunning by SleepGuardService.isServiceRunning.collectAsState()
 
@@ -194,6 +195,7 @@ fun HomeScreen(
                 connectionState = connectionState,
                 deviceInfo = deviceInfo,
                 metrics = deviceMetrics,
+                authStatusDetail = authStatusDetail,
                 onConnectClick = {
                     val mac = prefs.getDeviceMac()
                     val key = prefs.getAuthKeyHex()
@@ -356,6 +358,7 @@ private fun DeviceStatusCard(
     connectionState: BleConnectionState,
     deviceInfo: com.flashalarm.miband.domain.model.BleDeviceInfo,
     metrics: com.flashalarm.miband.domain.model.BleDeviceMetrics,
+    authStatusDetail: String = "",
     onConnectClick: () -> Unit,
     onConfigureClick: () -> Unit,
     onDisconnectClick: () -> Unit
@@ -409,6 +412,29 @@ private fun DeviceStatusCard(
                     color = MiBandCyan,
                     modifier = Modifier.clickable { onConfigureClick() }
                 )
+            }
+
+            if (authStatusDetail.isNotBlank() && connectionState != BleConnectionState.CONNECTED) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(PureBlack)
+                        .border(
+                            1.dp,
+                            if (connectionState == BleConnectionState.ERROR) HeartRateRed.copy(alpha = 0.5f) else GoldDream.copy(alpha = 0.3f),
+                            RoundedCornerShape(8.dp)
+                        )
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "⚡ 握手诊断: $authStatusDetail",
+                        fontSize = 11.sp,
+                        color = if (connectionState == BleConnectionState.ERROR) HeartRateRed else GoldDream,
+                        maxLines = 2
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.height(14.dp))

@@ -24,13 +24,16 @@ object BleConstants {
     val UUID_SERVICE_IMMEDIATE_ALERT: UUID = UUID.fromString("00001802-0000-1000-8000-00805f9b34fb")
     val UUID_CHAR_ALERT_LEVEL: UUID = UUID.fromString("00002a06-0000-1000-8000-00805f9b34fb")
 
-    // Auth Protocol Commands
-    val AUTH_CMD_REQUEST_RANDOM = byteArrayOf(0x02, 0x08)
-    val AUTH_CMD_REQUEST_RANDOM_ALT = byteArrayOf(0x02, 0x00)
-    val AUTH_BYTE_RESPONSE_PREFIX: Byte = 0x10
-    val AUTH_BYTE_RANDOM_KEY_OP: Byte = 0x02
-    val AUTH_BYTE_ENCRYPTED_KEY_OP: Byte = 0x03
-    val AUTH_BYTE_SUCCESS: Byte = 0x01
+    // Auth Protocol Commands & Opcodes
+    val AUTH_CMD_REQUEST_RANDOM = byteArrayOf(0x02, 0x00)          // Mi Band 4/5/6/7 standard
+    val AUTH_CMD_REQUEST_RANDOM_LEGACY = byteArrayOf(0x02, 0x08)   // Mi Band 2/3 legacy
+    const val AUTH_BYTE_RESPONSE_PREFIX: Byte = 0x10
+    const val AUTH_BYTE_PAIR_OP: Byte = 0x01
+    const val AUTH_BYTE_RANDOM_KEY_OP: Byte = 0x02
+    const val AUTH_BYTE_ENCRYPTED_KEY_OP: Byte = 0x03
+    const val AUTH_BYTE_SUCCESS: Byte = 0x01
+    const val AUTH_BYTE_FAIL_NOT_PAIRED: Byte = 0x04
+    const val AUTH_BYTE_FAIL_INVALID_KEY: Byte = 0x06
 
     // Heart Rate Commands
     val HR_START_CONTINUOUS = byteArrayOf(0x15, 0x01, 0x01)
