@@ -15,5 +15,6 @@ Captures
 .cxx
 local.properties
 
-# Do NOT ignore release.jks to ensure consistent signing across all builds and machines
+# Do NOT ignore release.jks and gradle-wrapper.jar
 !app/release.jks
+!gradle/wrapper/gradle-wrapper.jar
