@@ -24,7 +24,10 @@ data class AcousticBreathingState(
     val ambientRms: Float = 0.0f,
     val isAudioReliable: Boolean = false,
     val isAnalyzing: Boolean = false
-)
+) {
+    val ambientRmsDb: Float
+        get() = if (ambientRms > 1.0f) (20.0f * kotlin.math.log10(ambientRms.toDouble()).toFloat()).coerceIn(20.0f, 90.0f) else 20.0f
+}
 
 class BreathingAudioAnalyzer(
     private val scope: CoroutineScope

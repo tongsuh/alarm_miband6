@@ -1,13 +1,13 @@
 package com.flashalarm.miband.domain.model
 
-enum class BleConnectionState {
-    DISCONNECTED,
-    SCANNING,
-    CONNECTING,
-    AUTHENTICATING,
-    CONNECTED,
-    DISCONNECTING,
-    ERROR
+enum class BleConnectionState(val displayName: String) {
+    DISCONNECTED("手环未连接"),
+    SCANNING("正在扫描手环..."),
+    CONNECTING("正在建立连接..."),
+    AUTHENTICATING("正在进行Huami认证..."),
+    CONNECTED("已连接小米手环 6"),
+    DISCONNECTING("正在断开..."),
+    ERROR("连接断开/认证失败")
 }
 
 data class BleDeviceMetrics(

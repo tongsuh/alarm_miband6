@@ -340,7 +340,7 @@ fun SensorDiagnosticsDialog(
                         Spacer(modifier = Modifier.height(8.dp))
 
                         LinearProgressIndicator(
-                            progress = { (metrics.actigraphyG / 0.20f).coerceIn(0f, 1f) },
+                            progress = (metrics.actigraphyG / 0.20f).coerceIn(0f, 1f),
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(6.dp)
@@ -407,7 +407,7 @@ fun SensorDiagnosticsDialog(
                             Spacer(modifier = Modifier.height(6.dp))
 
                             LinearProgressIndicator(
-                                progress = { ((audioState.ambientRmsDb - 20f) / 50f).coerceIn(0f, 1f) },
+                                progress = ((audioState.ambientRmsDb - 20f) / 50f).coerceIn(0f, 1f),
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .height(6.dp)
