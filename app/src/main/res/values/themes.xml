@@ -9,6 +9,5 @@
 
     <style name="Theme.FlashAlarm.Fullscreen" parent="Theme.FlashAlarm">
         <item name="android:windowFullscreen">true</item>
-        <item name="android:windowKeepScreenOn">true</item>
     </style>
 </resources>
