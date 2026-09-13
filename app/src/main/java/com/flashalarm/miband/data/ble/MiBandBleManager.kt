@@ -214,7 +214,7 @@ class MiBandBleManager(
                 writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
                 startHrKeepAlive()
                 // Now enable sensor actigraphy
-                enableSensorNotifications(gatt)
+                gatt?.let { enableSensorNotifications(it) }
             }
         }
 
