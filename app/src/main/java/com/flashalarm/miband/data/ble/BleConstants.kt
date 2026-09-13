@@ -25,8 +25,11 @@ object BleConstants {
     val UUID_CHAR_ALERT_LEVEL: UUID = UUID.fromString("00002a06-0000-1000-8000-00805f9b34fb")
 
     // Auth Protocol Commands & Opcodes
-    val AUTH_CMD_REQUEST_RANDOM = byteArrayOf(0x02, 0x00)          // Mi Band 4/5/6/7 standard
-    val AUTH_CMD_REQUEST_RANDOM_LEGACY = byteArrayOf(0x02, 0x08)   // Mi Band 2/3 legacy
+    const val AUTH_BYTE_MODE_STANDARD: Byte = 0x08                 // Gadgetbridge / Notify / Mi Band standard AES-128 flag
+    const val AUTH_BYTE_MODE_ALT: Byte = 0x00                      // Alternative mode flag for certain firmware variants
+
+    val AUTH_CMD_REQUEST_RANDOM = byteArrayOf(0x02, AUTH_BYTE_MODE_STANDARD)
+    val AUTH_CMD_REQUEST_RANDOM_ALT = byteArrayOf(0x02, AUTH_BYTE_MODE_ALT)
     const val AUTH_BYTE_RESPONSE_PREFIX: Byte = 0x10
     const val AUTH_BYTE_PAIR_OP: Byte = 0x01
     const val AUTH_BYTE_RANDOM_KEY_OP: Byte = 0x02
@@ -34,6 +37,7 @@ object BleConstants {
     const val AUTH_BYTE_SUCCESS: Byte = 0x01
     const val AUTH_BYTE_FAIL_NOT_PAIRED: Byte = 0x04
     const val AUTH_BYTE_FAIL_INVALID_KEY: Byte = 0x06
+    const val AUTH_BYTE_FAIL_INVALID_FLAG: Byte = 0x07
 
     // Heart Rate Commands
     val HR_START_CONTINUOUS = byteArrayOf(0x15, 0x01, 0x01)

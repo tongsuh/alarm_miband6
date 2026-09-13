@@ -32,7 +32,7 @@ class HuamiAuthHandler(
     var currentStep: Step = Step.IDLE
         private set
 
-    var currentModeFlag: Byte = 0x00
+    var currentModeFlag: Byte = BleConstants.AUTH_BYTE_MODE_STANDARD
         private set
 
     fun setAuthKeyHex(hexKey: String): Boolean {
@@ -62,16 +62,16 @@ class HuamiAuthHandler(
         }
     }
 
-    fun startHandshake(legacy: Boolean = false): ByteArray {
+    fun startHandshake(useAltMode: Boolean = false): ByteArray {
         currentStep = Step.WAITING_CHALLENGE
-        currentModeFlag = if (legacy) 0x08 else 0x00
+        currentModeFlag = if (useAltMode) BleConstants.AUTH_BYTE_MODE_ALT else BleConstants.AUTH_BYTE_MODE_STANDARD
         Log.i(TAG, "Starting auth handshake with mode flag 0x%02X".format(currentModeFlag))
         return byteArrayOf(BleConstants.AUTH_BYTE_RANDOM_KEY_OP, currentModeFlag)
     }
 
-    fun startPairing(legacy: Boolean = false): ByteArray {
+    fun startPairing(useAltMode: Boolean = false): ByteArray {
         currentStep = Step.WAITING_PAIR_CONFIRM
-        currentModeFlag = if (legacy) 0x08 else 0x00
+        currentModeFlag = if (useAltMode) BleConstants.AUTH_BYTE_MODE_ALT else BleConstants.AUTH_BYTE_MODE_STANDARD
         Log.i(TAG, "Sending pairing key to band with flag 0x%02X".format(currentModeFlag))
         val packet = ByteArray(18)
         packet[0] = BleConstants.AUTH_BYTE_PAIR_OP
@@ -112,7 +112,12 @@ class HuamiAuthHandler(
             BleConstants.AUTH_BYTE_RANDOM_KEY_OP -> { // 0x02
                 if (status == BleConstants.AUTH_BYTE_FAIL_NOT_PAIRED || status == BleConstants.AUTH_BYTE_FAIL_INVALID_KEY) {
                     Log.w(TAG, "Band returned not paired status $status. Triggering pairing key registration...")
-                    return AuthResult.SendPacket(startPairing(currentModeFlag == 0x08.toByte()))
+                    return AuthResult.SendPacket(startPairing(currentModeFlag == BleConstants.AUTH_BYTE_MODE_ALT))
+                }
+
+                if (status == BleConstants.AUTH_BYTE_FAIL_INVALID_FLAG && currentModeFlag == BleConstants.AUTH_BYTE_MODE_STANDARD) {
+                    Log.w(TAG, "Band returned status 7 on mode 0x08, auto-retrying with alt mode 0x00...")
+                    return AuthResult.SendPacket(startHandshake(useAltMode = true))
                 }
 
                 if (status != BleConstants.AUTH_BYTE_SUCCESS) {
@@ -137,25 +142,41 @@ class HuamiAuthHandler(
                         return AuthResult.Failed("AES-128加密运算失败")
                     }
 
-                // Send response packet: [0x03, currentModeFlag] + encrypted 16 bytes
+                // Send response packet: [0x03, currentModeFlag] + encrypted 16 bytes (Gadgetbridge standard: [0x03, 0x08] + cipher)
                 val responsePacket = ByteArray(18)
                 responsePacket[0] = BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP
                 responsePacket[1] = currentModeFlag
                 System.arraycopy(encrypted, 0, responsePacket, 2, 16)
 
                 currentStep = Step.WAITING_CONFIRMATION
-                Log.i(TAG, "Sending encrypted challenge response [18 bytes]")
+                Log.i(TAG, "Sending encrypted challenge response [18 bytes] with mode 0x%02X".format(currentModeFlag))
                 return AuthResult.SendPacket(responsePacket)
             }
 
             BleConstants.AUTH_BYTE_ENCRYPTED_KEY_OP -> { // 0x03
-                return if (status == BleConstants.AUTH_BYTE_SUCCESS) {
-                    currentStep = Step.AUTHENTICATED
-                    Log.i(TAG, "Huami authentication handshake completed with SUCCESS!")
-                    AuthResult.Success
-                } else {
-                    currentStep = Step.FAILED
-                    AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status)。请核验AuthKey是否对应此手环MAC！")
+                return when (status) {
+                    BleConstants.AUTH_BYTE_SUCCESS -> {
+                        currentStep = Step.AUTHENTICATED
+                        Log.i(TAG, "Huami authentication handshake completed with SUCCESS!")
+                        AuthResult.Success
+                    }
+                    BleConstants.AUTH_BYTE_FAIL_INVALID_FLAG -> {
+                        if (currentModeFlag == BleConstants.AUTH_BYTE_MODE_STANDARD) {
+                            Log.w(TAG, "Status 7 on mode 0x08, auto-retrying with alt mode 0x00...")
+                            AuthResult.SendPacket(startHandshake(useAltMode = true))
+                        } else {
+                            currentStep = Step.FAILED
+                            AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status，指令标志不受支持)")
+                        }
+                    }
+                    BleConstants.AUTH_BYTE_FAIL_NOT_PAIRED -> {
+                        currentStep = Step.FAILED
+                        AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status，密钥不匹配)。请核验AuthKey是否正确！")
+                    }
+                    else -> {
+                        currentStep = Step.FAILED
+                        AuthResult.Failed("AuthKey认证被手环拒绝 (状态码: $status)。请核验AuthKey是否对应此手环MAC！")
+                    }
                 }
             }
 

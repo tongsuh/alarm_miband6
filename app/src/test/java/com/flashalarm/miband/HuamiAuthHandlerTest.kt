@@ -54,8 +54,21 @@ class HuamiAuthHandlerTest {
         val sendPacket = (result as AuthResult.SendPacket).data
         assertEquals(18, sendPacket.size)
         assertEquals(0x03.toByte(), sendPacket[0])
-        assertEquals(0x00.toByte(), sendPacket[1])
+        assertEquals(0x08.toByte(), sendPacket[1])
         assertEquals(HuamiAuthHandler.Step.WAITING_CONFIRMATION, authHandler.currentStep)
+    }
+
+    @Test
+    fun `test status 7 auto-fallback switches mode`() {
+        authHandler.startHandshake(useAltMode = false)
+        assertEquals(0x08.toByte(), authHandler.currentModeFlag)
+
+        // Band responds with status 7 on 0x03 (invalid flag)
+        val status7Notification = byteArrayOf(0x10, 0x03, 0x07)
+        val result = authHandler.handleAuthNotification(status7Notification)
+
+        assertTrue("Result should trigger new handshake packet with alt mode", result is AuthResult.SendPacket)
+        assertEquals(0x00.toByte(), authHandler.currentModeFlag)
     }
 
     @Test

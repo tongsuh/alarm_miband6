@@ -295,8 +295,8 @@ fun DevicePairingDialog(
 
                     OutlinedTextField(
                         value = authKeyInput,
-                        onValueChange = { authKeyInput = it.replace(" ", "").replace("0x", "").trim() },
-                        placeholder = { Text("例如：3027b40bc07e2c918e97...", fontSize = 12.sp) },
+                        onValueChange = { authKeyInput = it.filter { c -> !c.isWhitespace() } },
+                        placeholder = { Text("例如：3027b40bc07e2c918e97... 或 0x3027b...", fontSize = 12.sp) },
                         singleLine = true,
                         colors = OutlinedTextFieldDefaults.colors(
                             focusedBorderColor = GoldDream,
@@ -307,10 +307,15 @@ fun DevicePairingDialog(
                         modifier = Modifier.fillMaxWidth()
                     )
 
+                    val cleanLen = authKeyInput.replace(" ", "").replace("0x", "").replace("0X", "").length
                     Text(
-                        text = "💡 小米手环 6 认证必须提供 32 位 Hex Key，可通过 Zepp Life 或华米 Token 抓取工具导出。",
+                        text = if (cleanLen == 32) {
+                            "✅ 密钥有效：已就绪 (16字节 / 32位 Hex)"
+                        } else {
+                            "💡 小米手环 6 必须提供 32 位 Hex Key (当前有效: ${cleanLen}/32位)，前缀 0x 会自动兼容。"
+                        },
                         fontSize = 11.sp,
-                        color = DarkTextTertiary,
+                        color = if (cleanLen == 32) GoldDream else DarkTextTertiary,
                         modifier = Modifier.padding(top = 4.dp)
                     )
                 }

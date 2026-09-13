@@ -437,6 +437,8 @@ class MiBandBleManager(
                         val packetHex = result.data.joinToString(separator = " ") { "%02X".format(it) }
                         if (result.data.isNotEmpty() && result.data[0] == BleConstants.AUTH_BYTE_PAIR_OP) {
                             _authStatusDetail.value = "手环提示：请轻触手环屏幕确认配对..."
+                        } else if (result.data.isNotEmpty() && result.data[0] == BleConstants.AUTH_BYTE_RANDOM_KEY_OP) {
+                            _authStatusDetail.value = "正在请求手环挑战码 (模式: 0x%02X)...".format(result.data.getOrElse(1) { 0 })
                         } else {
                             _authStatusDetail.value = "已获取Challenge，正在进行AES运算并回传密文..."
                         }
