@@ -385,7 +385,7 @@ class MiBandBleManager(
                 // Dispatch with slight delay so the GATT stack transitions out of GATT_BUSY state!
                 scope.launch(Dispatchers.IO) {
                     delay(150L)
-                    val requestPacket = authHandler.startHandshake(legacy = false)
+                    val requestPacket = authHandler.startHandshake()
                     Log.i(TAG, "Writing request random challenge packet: ${requestPacket.joinToString(separator = " ") { "%02X".format(it) }}")
                     _authStatusDetail.value = "安全通道就绪，已发送0x02请求，等待手环Challenge..."
                     val writeSuccess = writeCharacteristic(BleConstants.UUID_SERVICE_AUTH, BleConstants.UUID_CHAR_AUTH, requestPacket)

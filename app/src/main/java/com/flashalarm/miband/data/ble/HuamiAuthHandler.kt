@@ -62,14 +62,14 @@ class HuamiAuthHandler(
         }
     }
 
-    fun startHandshake(useAltMode: Boolean = false): ByteArray {
+    fun startHandshake(useAltMode: Boolean = false, legacy: Boolean = false): ByteArray {
         currentStep = Step.WAITING_CHALLENGE
         currentModeFlag = if (useAltMode) BleConstants.AUTH_BYTE_MODE_ALT else BleConstants.AUTH_BYTE_MODE_STANDARD
         Log.i(TAG, "Starting auth handshake with mode flag 0x%02X".format(currentModeFlag))
         return byteArrayOf(BleConstants.AUTH_BYTE_RANDOM_KEY_OP, currentModeFlag)
     }
 
-    fun startPairing(useAltMode: Boolean = false): ByteArray {
+    fun startPairing(useAltMode: Boolean = false, legacy: Boolean = false): ByteArray {
         currentStep = Step.WAITING_PAIR_CONFIRM
         currentModeFlag = if (useAltMode) BleConstants.AUTH_BYTE_MODE_ALT else BleConstants.AUTH_BYTE_MODE_STANDARD
         Log.i(TAG, "Sending pairing key to band with flag 0x%02X".format(currentModeFlag))
