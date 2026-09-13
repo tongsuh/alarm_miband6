@@ -532,6 +532,15 @@ class MiBandBleManager(
                         }
                     }
 
+                    is AuthResult.SendChunks -> {
+                        scope.launch(Dispatchers.IO) {
+                            for (chunk in result.chunks) {
+                                delay(40L)
+                                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                            }
+                        }
+                    }
+
                     is AuthResult.Success -> {
                         Log.i(TAG, "Huami authentication SUCCESSFUL! Mi Band 6 is authenticated and ready.")
                         authTimeoutJob?.cancel()

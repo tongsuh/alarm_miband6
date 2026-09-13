@@ -453,15 +453,56 @@ fun UnifiedSettingsDialog(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("震动强度等级", fontSize = 12.sp, color = DarkTextSecondary)
-                                    Text(if (currentPattern.intensityLevel == 2) "强震动" else "柔和温和", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                                    Text("起始强度 (PWM占空比)", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("${currentPattern.startIntensityPercent}%", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
                                 }
                                 Slider(
-                                    value = currentPattern.intensityLevel.toFloat(),
-                                    onValueChange = { updateCurrentPattern { p -> p.copy(intensityLevel = it.toInt().coerceIn(1, 2)) } },
-                                    valueRange = 1f..2f,
-                                    steps = 0,
+                                    value = currentPattern.startIntensityPercent.toFloat(),
+                                    onValueChange = { updateCurrentPattern { p -> p.copy(startIntensityPercent = it.toInt()) } },
+                                    valueRange = 10f..100f,
                                     colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("结束强度 (渐变目标)", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("${currentPattern.endIntensityPercent}%", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = currentPattern.endIntensityPercent.toFloat(),
+                                    onValueChange = { updateCurrentPattern { p -> p.copy(endIntensityPercent = it.toInt()) } },
+                                    valueRange = 10f..100f,
+                                    colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("脉冲微震持续", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("${currentPattern.pulseMs} ms", fontSize = 12.sp, color = MiBandCyan, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = currentPattern.pulseMs.toFloat(),
+                                    onValueChange = { updateCurrentPattern { p -> p.copy(pulseMs = it.toInt()) } },
+                                    valueRange = 50f..500f,
+                                    colors = SliderDefaults.colors(thumbColor = MiBandCyan, activeTrackColor = MiBandCyan)
+                                )
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("间隔休眠", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("${currentPattern.pauseMs} ms", fontSize = 12.sp, color = AlertPurple, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = currentPattern.pauseMs.toFloat(),
+                                    onValueChange = { updateCurrentPattern { p -> p.copy(pauseMs = it.toInt()) } },
+                                    valueRange = 50f..1000f,
+                                    colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
                                 )
 
                                 Spacer(modifier = Modifier.height(8.dp))
