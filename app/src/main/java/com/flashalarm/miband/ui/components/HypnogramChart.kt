@@ -34,6 +34,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -135,70 +136,89 @@ fun HypnogramChart(
             .padding(16.dp)
     ) {
         // Minimal Stage Info Header
-        Row(
+        Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 12.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
+                .padding(bottom = 12.dp)
         ) {
-            if (matchedCue != null) {
-                // Star marker & exact timestamp display on cue hit
-                Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                if (scrubInfo != null) {
+                    // Minimal Stage Display: e.g. "深睡 · 00:30 ~ 01:50" (strictly no redundant duration text)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            modifier = Modifier
+                                .size(8.dp)
+                                .background(scrubInfo.stageColor, RoundedCornerShape(4.dp))
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "${scrubInfo.stageName} · ${scrubInfo.timeRangeStr}",
+                            color = DarkTextPrimary,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    // Overlaid Heart Rate at that moment: e.g. "68 bpm"
                     Text(
-                        text = "⭐ 触梦提醒 · ${timeWithSecFormat.format(Date(matchedCue.timestamp))}",
-                        color = GoldDream,
-                        fontSize = 15.sp,
+                        text = "${scrubInfo.heartRateBpm} bpm",
+                        color = HeartRateRed,
+                        fontSize = 14.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                } else {
                     Text(
-                        text = "【${matchedCue.cadenceName}】",
+                        text = "催眠图谱与心率流",
                         color = DarkTextSecondary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Medium
+                    )
+                    Text(
+                        text = "手指左右滑动探索",
+                        color = DarkTextTertiary,
                         fontSize = 12.sp
                     )
                 }
-                Text(
-                    text = "${scrubInfo?.heartRateBpm ?: 0} bpm",
-                    color = HeartRateRed,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            } else if (scrubInfo != null) {
-                // Minimal Stage Display: e.g. "深睡 · 00:30 ~ 01:50" (strictly no redundant duration text)
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .background(scrubInfo.stageColor, RoundedCornerShape(4.dp))
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = "${scrubInfo.stageName} · ${scrubInfo.timeRangeStr}",
-                        color = DarkTextPrimary,
-                        fontSize = 15.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
+            }
+
+            // Second line: dream cue moment and current time, appended below without replacing line 1
+            if (matchedCue != null) {
+                val currentPointTime = if (scrubIndex != null && scrubIndex!! in epochs.indices) {
+                    timeFormat.format(Date(epochs[scrubIndex!!].timestamp))
+                } else ""
+
+                Spacer(modifier = Modifier.height(6.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "⭐ 触梦时刻 · ${timeFormat.format(Date(matchedCue.timestamp))}",
+                            color = GoldDream,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "【${matchedCue.cadenceName}】",
+                            color = DarkTextSecondary,
+                            fontSize = 11.sp
+                        )
+                    }
+                    if (currentPointTime.isNotBlank()) {
+                        Text(
+                            text = "当前 $currentPointTime",
+                            color = GoldDream.copy(alpha = 0.8f),
+                            fontSize = 11.sp,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
-                // Overlaid Heart Rate at that moment: e.g. "68 bpm"
-                Text(
-                    text = "${scrubInfo.heartRateBpm} bpm",
-                    color = HeartRateRed,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold
-                )
-            } else {
-                Text(
-                    text = "催眠图谱与心率流",
-                    color = DarkTextSecondary,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Medium
-                )
-                Text(
-                    text = "手指左右滑动探索",
-                    color = DarkTextTertiary,
-                    fontSize = 12.sp
-                )
             }
         }
 

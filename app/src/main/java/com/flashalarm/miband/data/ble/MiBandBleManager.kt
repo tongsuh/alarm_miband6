@@ -422,6 +422,14 @@ class MiBandBleManager(
                     delay(150L)
                     gatt?.let { enableSensorNotifications(it) }
                 }
+            } else if (charUuid == BleConstants.UUID_CHAR_SENSOR_DATA) {
+                scope.launch(Dispatchers.IO) {
+                    delay(100L)
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.SENSOR_START_CMD)
+                    delay(100L)
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, byteArrayOf(0x01, 0x01, 0x19))
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
+                }
             }
         }
 
@@ -472,9 +480,14 @@ class MiBandBleManager(
 
                 gatt?.requestMtu(512)
 
+                // Subscribe HR + sensor directly (don't rely on descriptor write cascade)
                 scope.launch(Dispatchers.IO) {
                     delay(250L)
-                    gatt?.let { subscribeHeartRate(it) }
+                    gatt?.let { g ->
+                        subscribeHeartRate(g)
+                        delay(200L)
+                        enableSensorNotifications(g)
+                    }
                 }
             }
             is AuthResult.Failed -> {
@@ -549,7 +562,11 @@ class MiBandBleManager(
                         // Start heart rate & actigraphy sensor data subscriptions
                         scope.launch(Dispatchers.IO) {
                             delay(250L)
-                            bluetoothGatt?.let { subscribeHeartRate(it) }
+                            bluetoothGatt?.let { g ->
+                                subscribeHeartRate(g)
+                                delay(200L)
+                                enableSensorNotifications(g)
+                            }
                         }
                     }
 
@@ -575,9 +592,10 @@ class MiBandBleManager(
                     }
 
                     if (hr > 0) {
+                        val streaming = hrKeepAliveJob?.isActive == true
                         _deviceMetrics.value = _deviceMetrics.value.copy(
                             heartRateBpm = hr,
-                            isHrStreaming = true
+                            isHrStreaming = streaming
                         )
                         _heartRateFlow.tryEmit(hr)
                     }
@@ -601,13 +619,36 @@ class MiBandBleManager(
         }
     }
 
-    private fun enableSensorNotifications(gatt: BluetoothGatt) {
-        val huamiService = gatt.getService(BleConstants.UUID_SERVICE_HUAMI) ?: return
-        val sensorDataChar = huamiService.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
-        if (sensorDataChar != null) {
-            enableNotification(gatt, sensorDataChar)
-            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.SENSOR_START_CMD)
-            _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
+    fun enableSensorNotifications(gatt: BluetoothGatt? = bluetoothGatt) {
+        val g = gatt ?: bluetoothGatt ?: run {
+            Log.w(TAG, "enableSensorNotifications: bluetoothGatt is null")
+            return
+        }
+        scope.launch(Dispatchers.IO) {
+            var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
+            var sensorDataChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
+            var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+
+            if (sensorDataChar == null || sensorCtrlChar == null) {
+                for (s in g.services) {
+                    if (sensorDataChar == null) sensorDataChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
+                    if (sensorCtrlChar == null) sensorCtrlChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                }
+            }
+
+            if (sensorDataChar != null) {
+                Log.i(TAG, "Enabling sensor data notification on 0x0002...")
+                enableNotification(g, sensorDataChar)
+                delay(300L)
+            }
+
+            if (sensorCtrlChar != null) {
+                Log.i(TAG, "Writing SENSOR_START_CMD to 0x0001...")
+                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.SENSOR_START_CMD)
+                delay(150L)
+                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, byteArrayOf(0x01, 0x01, 0x19))
+                _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
+            }
         }
     }
 
@@ -654,12 +695,38 @@ class MiBandBleManager(
 
     fun setHeartRateStreamingMode(isContinuous: Boolean) {
         if (isContinuous) {
-            writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+            if (use2021Protocol) {
+                // 2021 firmware: send HR start via chunked endpoint 0x001D
+                val payload = BleConstants.HR_START_CONTINUOUS
+                val chunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, payload)
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in chunks) {
+                        delay(40L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } else {
+                writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+            }
             startHrKeepAlive()
         } else {
             hrKeepAliveJob?.cancel()
             hrKeepAliveJob = null
-            writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_PING_KEEPALIVE)
+            if (use2021Protocol) {
+                // 2021 firmware: send HR stop via chunked endpoint 0x001D
+                val payload = BleConstants.HR_STOP_CONTINUOUS
+                val chunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, payload)
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in chunks) {
+                        delay(40L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } else {
+                writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_STOP_CONTINUOUS)
+            }
+            // Explicitly reset streaming state so the UI updates immediately
+            _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
         }
     }
 
@@ -829,19 +896,47 @@ class MiBandBleManager(
     }
 
     private fun writeAlertLevel(level: Int) {
-        val gatt = bluetoothGatt ?: return
-        val service = gatt.getService(BleConstants.UUID_SERVICE_IMMEDIATE_ALERT) ?: return
-        val char = service.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL) ?: return
+        val vibrateFlag: Byte = if (level > 0) 0x01 else 0x00
+        if (use2021Protocol) {
+            // 2021 firmware: use chunked protocol FIND_DEVICE endpoint (0x001A)
+            val chunks1 = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE, byteArrayOf(vibrateFlag))
+            val chunks2 = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE, byteArrayOf(0x03, vibrateFlag))
+            scope.launch(Dispatchers.IO) {
+                for (chunk in chunks1) {
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                }
+                for (chunk in chunks2) {
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                }
+            }
+        }
 
-        val data = byteArrayOf(level.toByte())
-        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-        } else {
-            @Suppress("DEPRECATION")
-            char.value = data
-            @Suppress("DEPRECATION")
-            gatt.writeCharacteristic(char)
+        // Multi-layer insurance: also write Immediate Alert Service (0x1802)
+        val gatt = bluetoothGatt ?: return
+        var service = gatt.getService(BleConstants.UUID_SERVICE_IMMEDIATE_ALERT)
+        var char = service?.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
+        if (char == null) {
+            for (s in gatt.services) {
+                val c = s.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
+                if (c != null) {
+                    char = c
+                    service = s
+                    break
+                }
+            }
+        }
+
+        if (char != null) {
+            val data = byteArrayOf(level.toByte())
+            char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+            } else {
+                @Suppress("DEPRECATION")
+                char.value = data
+                @Suppress("DEPRECATION")
+                gatt.writeCharacteristic(char)
+            }
         }
     }
 }

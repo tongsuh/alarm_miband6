@@ -203,6 +203,28 @@ fun SleepAnalysisScreen(
                     cues = currentCues,
                     timeFormat = timeFormat
                 )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
+                OutlinedButton(
+                    onClick = { showDeleteConfirmDialog = true },
+                    modifier = Modifier.fillMaxWidth().height(44.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, HeartRateRed.copy(alpha = 0.4f)),
+                    colors = ButtonDefaults.outlinedButtonColors(
+                        containerColor = HeartRateRed.copy(alpha = 0.08f),
+                        contentColor = HeartRateRed
+                    )
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.ic_trash),
+                        contentDescription = null,
+                        tint = HeartRateRed,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("彻底删除此睡眠记录", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = HeartRateRed)
+                }
             } ?: run {
                 Box(
                     modifier = Modifier
@@ -291,21 +313,24 @@ private fun SleepRecapCard(
                 Row(
                     modifier = Modifier
                         .clip(RoundedCornerShape(8.dp))
+                        .background(HeartRateRed.copy(alpha = 0.12f))
+                        .border(1.dp, HeartRateRed.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
                         .clickable { onDeleteClick() }
-                        .padding(horizontal = 8.dp, vertical = 4.dp),
+                        .padding(horizontal = 10.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Icon(
                         painter = painterResource(id = R.drawable.ic_trash),
                         contentDescription = "Delete Record",
-                        tint = DarkTextTertiary,
-                        modifier = Modifier.size(13.dp)
+                        tint = HeartRateRed,
+                        modifier = Modifier.size(14.dp)
                     )
-                    Spacer(modifier = Modifier.width(4.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = "删除记录",
+                        text = "删除此记录",
                         fontSize = 12.sp,
-                        color = DarkTextTertiary
+                        fontWeight = FontWeight.SemiBold,
+                        color = HeartRateRed
                     )
                 }
             }

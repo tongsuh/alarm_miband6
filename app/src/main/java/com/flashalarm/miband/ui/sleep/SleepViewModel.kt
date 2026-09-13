@@ -43,16 +43,26 @@ class SleepViewModel(application: Application) : AndroidViewModel(application) {
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
+    private var hasCheckedInitialSeed = false
+
     init {
         viewModelScope.launch {
             allSessions.collect { sessions ->
                 if (sessions.isNotEmpty()) {
+                    hasCheckedInitialSeed = true
                     if (_selectedSessionId.value == null || sessions.none { it.sessionId == _selectedSessionId.value }) {
                         selectSession(sessions.first().sessionId)
                     }
                 } else {
-                    // Seed mock session on first startup so user can immediately experience the hypnogram chart
-                    repository.seedMockSleepSession()
+                    if (!hasCheckedInitialSeed) {
+                        hasCheckedInitialSeed = true
+                        // Seed mock session on first startup so user can immediately experience the hypnogram chart
+                        repository.seedMockSleepSession()
+                    } else {
+                        // User explicitly deleted all sessions: keep empty state
+                        _selectedSessionId.value = null
+                        _selectedSession.value = null
+                    }
                 }
             }
         }

@@ -19,6 +19,8 @@ object BleConstants {
     val UUID_CHAR_CHUNKED_2021_WRITE: UUID = UUID.fromString("00000016-0000-3512-2118-0009af100700")
     val UUID_CHAR_CHUNKED_2021_READ: UUID = UUID.fromString("00000017-0000-3512-2118-0009af100700")
     const val CHUNKED2021_ENDPOINT_AUTH: Short = 0x0082.toShort()
+    const val CHUNKED2021_ENDPOINT_HEARTRATE: Short = 0x001D
+    const val CHUNKED2021_ENDPOINT_FIND_DEVICE: Short = 0x001A
 
     // Standard Heart Rate Service (0x180D)
     val UUID_SERVICE_HEART_RATE: UUID = UUID.fromString("0000180d-0000-1000-8000-00805f9b34fb")
@@ -63,6 +65,7 @@ object BleConstants {
     // Heart Rate Commands
     val HR_START_CONTINUOUS = byteArrayOf(0x15, 0x01, 0x01)
     val HR_START_CONTINUOUS_ALT = byteArrayOf(0x15, 0x02, 0x01)
+    val HR_STOP_CONTINUOUS = byteArrayOf(0x15, 0x01, 0x00)
     val HR_PING_KEEPALIVE = byteArrayOf(0x16)
 
     // Sensor Commands (Actigraphy streaming)

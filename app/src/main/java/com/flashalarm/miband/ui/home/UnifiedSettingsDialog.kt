@@ -346,6 +346,31 @@ fun UnifiedSettingsDialog(
                                         color = DarkTextTertiary
                                     )
                                 }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Button(
+                                    onClick = {
+                                        if (connectionState == BleConnectionState.CONNECTED) {
+                                            bleManager.enableSensorNotifications()
+                                            Toast.makeText(context, "已向手环发送三轴体动监测激活指令", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
+                                    modifier = Modifier.fillMaxWidth().height(36.dp),
+                                    shape = RoundedCornerShape(8.dp),
+                                    colors = ButtonDefaults.buttonColors(
+                                        containerColor = if (metrics.isMotionStreaming) Color(0xFF334155) else MiBandCyan
+                                    )
+                                ) {
+                                    Text(
+                                        text = if (metrics.isMotionStreaming) "重新激活体动流 (监听中)" else "启动三轴体动监测",
+                                        fontSize = 12.sp,
+                                        color = if (metrics.isMotionStreaming) Color.White else Color.Black,
+                                        fontWeight = FontWeight.SemiBold
+                                    )
+                                }
                             }
                         }
                     }
