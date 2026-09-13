@@ -717,7 +717,7 @@ fun UnifiedSettingsDialog(
                                         onCheckedChange = { enabled ->
                                             newProtocolEnabled = enabled
                                             onToggle2021Protocol(enabled)
-                                            bleManager.setUse2021Protocol(enabled)
+                                            bleManager.use2021Protocol = enabled
                                             Toast.makeText(
                                                 context,
                                                 if (enabled) "已启用 2021 新认证协议 (适用于固件 v1.0.6+)" else "已切换为经典握手协议",

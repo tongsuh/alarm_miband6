@@ -113,11 +113,6 @@ class MiBandBleManager(
         authHandler.setAuthKeyHex(cleanKey)
     }
 
-    fun setUse2021Protocol(enabled: Boolean) {
-        this.use2021Protocol = enabled
-        Log.i(TAG, "use2021Protocol set to $enabled")
-    }
-
     /**
      * Starts BLE scanning to discover nearby Mi Band or BLE devices.
      */
