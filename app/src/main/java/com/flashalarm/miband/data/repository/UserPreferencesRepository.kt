@@ -120,6 +120,7 @@ class UserPreferencesRepository(context: Context) {
                     put("pulseMs", p.pulseMs)
                     put("pauseMs", p.pauseMs)
                     put("durationSeconds", p.durationSeconds)
+                    put("repeatCount", p.repeatCount)
                 }
                 array.put(obj)
             }
@@ -150,9 +151,10 @@ class UserPreferencesRepository(context: Context) {
                         type = type,
                         startIntensityPercent = obj.optInt("startIntensityPercent", 20),
                         endIntensityPercent = obj.optInt("endIntensityPercent", 80),
-                        pulseMs = obj.optInt("pulseMs", 150),
-                        pauseMs = obj.optInt("pauseMs", 250),
-                        durationSeconds = obj.optInt("durationSeconds", 15)
+                        pulseMs = obj.optInt("pulseMs", 200),
+                        pauseMs = obj.optInt("pauseMs", 600),
+                        durationSeconds = obj.optInt("durationSeconds", 15),
+                        repeatCount = obj.optInt("repeatCount", 3)
                     )
                 )
             }

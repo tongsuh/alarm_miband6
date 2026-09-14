@@ -16,8 +16,8 @@ data class CustomizableVibrationPattern(
     val type: PatternType,
     val startIntensityPercent: Int = 20, // 10% - 100%
     val endIntensityPercent: Int = 80,   // 10% - 100%
-    val pulseMs: Int = 120,              // 50ms - 500ms
-    val pauseMs: Int = 250,              // 50ms - 1000ms
+    val pulseMs: Int = 200,              // 100ms - 1000ms
+    val pauseMs: Int = 600,              // 400ms - 2000ms (>=500ms required for firmware call state machine reset)
     val durationSeconds: Int = 15,       // 5s - 300s (up to 5 min!)
     val repeatCount: Int = 3             // 1 - 10 times
 )
@@ -58,8 +58,8 @@ data class DreamCueConfig(
                     type = PatternType.WATERDROP,
                     startIntensityPercent = 20,
                     endIntensityPercent = 20,
-                    pulseMs = 100,
-                    pauseMs = 1200,
+                    pulseMs = 180,
+                    pauseMs = 1000,
                     durationSeconds = 15,
                     repeatCount = 3
                 ),
@@ -69,8 +69,8 @@ data class DreamCueConfig(
                     type = PatternType.SHORT,
                     startIntensityPercent = 35,
                     endIntensityPercent = 35,
-                    pulseMs = 160,
-                    pauseMs = 250,
+                    pulseMs = 200,
+                    pauseMs = 600,
                     durationSeconds = 15,
                     repeatCount = 3
                 ),
@@ -80,8 +80,8 @@ data class DreamCueConfig(
                     type = PatternType.STEADY,
                     startIntensityPercent = 40,
                     endIntensityPercent = 40,
-                    pulseMs = 200,
-                    pauseMs = 300,
+                    pulseMs = 250,
+                    pauseMs = 650,
                     durationSeconds = 15,
                     repeatCount = 3
                 ),
@@ -91,8 +91,8 @@ data class DreamCueConfig(
                     type = PatternType.CRESCENDO,
                     startIntensityPercent = 20,
                     endIntensityPercent = 80,
-                    pulseMs = 150,
-                    pauseMs = 250,
+                    pulseMs = 220,
+                    pauseMs = 550,
                     durationSeconds = 20,
                     repeatCount = 4
                 ),
@@ -102,7 +102,7 @@ data class DreamCueConfig(
                     type = PatternType.HEARTBEAT,
                     startIntensityPercent = 40,
                     endIntensityPercent = 60,
-                    pulseMs = 120,
+                    pulseMs = 160,
                     pauseMs = 700,
                     durationSeconds = 15,
                     repeatCount = 3

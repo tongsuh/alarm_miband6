@@ -504,7 +504,7 @@ fun UnifiedSettingsDialog(
                                 Slider(
                                     value = currentPattern.pulseMs.toFloat(),
                                     onValueChange = { updateCurrentPattern { p -> p.copy(pulseMs = it.toInt()) } },
-                                    valueRange = 80f..1000f,
+                                    valueRange = 100f..1000f,
                                     colors = SliderDefaults.colors(thumbColor = MiBandCyan, activeTrackColor = MiBandCyan)
                                 )
 
@@ -518,13 +518,13 @@ fun UnifiedSettingsDialog(
                                 Slider(
                                     value = currentPattern.pauseMs.toFloat(),
                                     onValueChange = { updateCurrentPattern { p -> p.copy(pauseMs = it.toInt()) } },
-                                    valueRange = 80f..1000f,
+                                    valueRange = 400f..2000f,
                                     colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
                                 )
 
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "说明：采用与 Gadgetbridge 对齐的实时警报通道，时序严格串行同步，设几次就精准物理震动几次。",
+                                    text = "说明：采用与 Gadgetbridge 对齐的实时警报通道，时序严格串行同步并保证手环固件复位安全间歇（≥500ms），设几次就精准物理震动几次。",
                                     fontSize = 10.sp,
                                     color = DarkTextTertiary,
                                     lineHeight = 14.sp

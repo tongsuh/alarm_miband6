@@ -20,9 +20,11 @@ import com.flashalarm.miband.domain.model.BleDeviceMetrics
 import com.flashalarm.miband.domain.model.CustomizableVibrationPattern
 import com.flashalarm.miband.domain.model.PatternType
 import com.flashalarm.miband.domain.model.VibrationCadenceType
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -32,6 +34,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
@@ -1038,16 +1041,26 @@ class MiBandBleManager(
         pattern: CustomizableVibrationPattern,
         onComplete: (() -> Unit)? = null
     ) {
-        stopVibration()
+        // Cancel any active vibration job cleanly without launching competing async writes
+        vibrationJob?.cancel()
+        vibrationJob = null
 
         val repeatCount = pattern.repeatCount.coerceIn(1, 10)
-        val pulseMs = pattern.pulseMs.toLong().coerceIn(80L, 2000L)
-        // Handshake/firmware call state machine requires >= 250ms interval between call end and next call start
-        val pauseMs = pattern.pauseMs.toLong().coerceAtLeast(250L)
+        val pulseMs = pattern.pulseMs.toLong().coerceIn(100L, 2000L)
+        // Handshake/firmware call state machine requires >= 500ms interval between call end and next call start
+        // to complete teardown animation and reset GSM debounce timer, otherwise subsequent calls are silently dropped.
+        val pauseMs = pattern.pauseMs.toLong().coerceAtLeast(500L)
 
         vibrationJob = scope.launch(Dispatchers.IO) {
+            val wasVibrating = isVibrating
             isVibrating = true
             try {
+                // If motor was previously vibrating, ensure it is cleanly stopped and settled first
+                if (wasVibrating) {
+                    sendCallStop()
+                    delay(200L)
+                }
+
                 for (r in 0 until repeatCount) {
                     if (!isActive) break
 
@@ -1068,10 +1081,17 @@ class MiBandBleManager(
                         delay(pauseMs)
                     }
                 }
+            } catch (e: CancellationException) {
+                // Cancelled early by stopVibration(), guarantee cleanup
+                withContext(NonCancellable) {
+                    sendCallStop()
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in custom vibration job", e)
+                withContext(NonCancellable) {
+                    sendCallStop()
+                }
             } finally {
-                sendCallStop()
                 isVibrating = false
                 onComplete?.invoke()
             }
@@ -1107,7 +1127,9 @@ class MiBandBleManager(
     fun stopVibration() {
         vibrationJob?.cancel()
         vibrationJob = null
-        stopMotorVibration()
+        if (isVibrating) {
+            stopMotorVibration()
+        }
         isVibrating = false
     }
 
