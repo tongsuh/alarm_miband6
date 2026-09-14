@@ -849,33 +849,55 @@ private fun DreamCueConfigCard(
 
 @Composable
 private fun AlgorithmOverviewCard() {
+    var expanded by remember { mutableStateOf(false) }
+
     Card(
         modifier = Modifier
             .fillMaxWidth()
-            .border(1.dp, DarkBorder, RoundedCornerShape(20.dp)),
-        shape = RoundedCornerShape(20.dp),
+            .border(1.dp, DarkBorder, RoundedCornerShape(16.dp))
+            .clickable { expanded = !expanded },
+        shape = RoundedCornerShape(16.dp),
         colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
     ) {
-        Column(modifier = Modifier.padding(18.dp)) {
-            Text(
-                text = "多模态 REM 触梦分期逻辑",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.Bold,
-                color = DarkTextPrimary
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            AlgorithmBullet(
-                title = "Cole-Kripke 入睡状态机",
-                desc = "自动跟踪入睡时的连续静止与心率沉降，相对锁定深睡保护期与做梦期"
-            )
-            AlgorithmBullet(
-                title = "75% 手环生理多模态骨架",
-                desc = "骨骼肌瘫痪（翻身动作一票否决）+ 自主神经风暴（心率突增与HRV离散跳变）"
-            )
-            AlgorithmBullet(
-                title = "25% 手机夜间呼吸声学印证",
-                desc = "后半夜呼吸不规则度交叉验证，置信度达标后精准下发腕部微震或潜意识耳语"
-            )
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(text = "ℹ️", fontSize = 13.sp)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "触梦分期机制说明",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DarkTextPrimary
+                    )
+                }
+                Text(
+                    text = if (expanded) "收起 ▲" else "展开 ▼",
+                    fontSize = 11.sp,
+                    color = DarkTextTertiary
+                )
+            }
+
+            AnimatedVisibility(visible = expanded) {
+                Column(modifier = Modifier.padding(top = 10.dp)) {
+                    AlgorithmBullet(
+                        title = "Cole-Kripke 入睡状态机",
+                        desc = "自动跟踪入睡连续静止与心率沉降，相对锁定深睡保护期与做梦期"
+                    )
+                    AlgorithmBullet(
+                        title = "手环生理多模态骨架",
+                        desc = "骨骼肌瘫痪（翻身动作一票否决）与自主神经风暴（心率突增与HRV离散跳变）"
+                    )
+                    AlgorithmBullet(
+                        title = "声学印证与精准触达",
+                        desc = "夜间呼吸不规则度交叉验证，置信度达标后下发腕部微震或潜意识耳语"
+                    )
+                }
+            }
         }
     }
 }

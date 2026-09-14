@@ -32,6 +32,8 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.util.UUID
 import kotlin.math.sqrt
 
@@ -621,10 +623,15 @@ class MiBandBleManager(
         }
     }
 
-    fun enableSensorNotifications(gatt: BluetoothGatt? = bluetoothGatt) {
+    fun enableSensorNotifications(gatt: BluetoothGatt? = bluetoothGatt, resetBaseline: Boolean = false) {
         val g = gatt ?: bluetoothGatt ?: run {
             Log.w(TAG, "enableSensorNotifications: bluetoothGatt is null")
             return
+        }
+        if (resetBaseline) {
+            hasPrevSample = false
+            smoothedActigraphy = 0.0f
+            _deviceMetrics.value = _deviceMetrics.value.copy(actigraphyG = 0.0f)
         }
         _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
         scope.launch(Dispatchers.IO) {
@@ -910,6 +917,71 @@ class MiBandBleManager(
         }
     }
 
+    /**
+     * Huami 2021 Custom Vibration Pattern Protocol (Gadgetbridge compatible)
+     * Writes to CHUNKED2021_ENDPOINT_COMPAT (0x0090) with header [0x00, 0x00, 0xC2, 0x00] and opcode 0x20.
+     * When test = true, flag has bit 7 (0x80) set:
+     * - The band hardware motor plays the [on_ms, off_ms] sequence directly.
+     * - Does NOT trigger an incoming call or notification screen!
+     * - Zero roundtrip Bluetooth debounce or pulse dropping.
+     */
+    fun sendNativeVibrationPattern(
+        onOffSequence: List<Short>,
+        notifType: Byte = 0x09, // FIND_BAND (0x09) does not display incoming call UI
+        test: Boolean = true
+    ): Boolean {
+        if (!use2021Protocol || onOffSequence.isEmpty()) {
+            return false
+        }
+
+        // The pattern must consist of even pairs [on_ms, off_ms, ...]
+        val normalizedList = if (onOffSequence.size % 2 != 0) {
+            onOffSequence + 0.toShort()
+        } else {
+            onOffSequence
+        }
+
+        val pairCount = normalizedList.size / 2
+        var flag = pairCount or 0x40
+        if (test) {
+            flag = flag or 0x80
+        }
+
+        val buffer = ByteBuffer.allocate(3 + normalizedList.size * 2).order(ByteOrder.LITTLE_ENDIAN)
+        buffer.put(0x20.toByte()) // Custom vibration opcode
+        buffer.put(notifType)    // Notification type (0x09: FIND_BAND, 0x01: CALL, 0x00: APP)
+        buffer.put(flag.toByte())
+        for (duration in normalizedList) {
+            buffer.putShort(duration)
+        }
+
+        val header = byteArrayOf(0x00, 0x00, 0xC2.toByte(), 0x00)
+        val payload = header + buffer.array()
+
+        return try {
+            val chunks = chunkedEncoder.encode(
+                BleConstants.CHUNKED2021_ENDPOINT_COMPAT,
+                payload,
+                extendedFlags = true,
+                encrypt = true
+            )
+            if (chunks.isEmpty()) {
+                Log.w(TAG, "sendNativeVibrationPattern: chunkedEncoder returned empty")
+                return false
+            }
+            scope.launch(Dispatchers.IO) {
+                for (chunk in chunks) {
+                    delay(20L)
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                }
+            }
+            true
+        } catch (e: Exception) {
+            Log.e(TAG, "sendNativeVibrationPattern failed", e)
+            false
+        }
+    }
+
     private fun startMotorVibration(onTimeMs: Int = 300) {
         // 1. Huami 2021 Chunked Protocol: Endpoint 0x0090 (CALL_INCOMING)
         // Mi Band 6 ignores standard 0x001A and 0x2A06, but triggers physical motor via 2021 call notifications
@@ -1045,24 +1117,71 @@ class MiBandBleManager(
     ) {
         stopVibration()
 
+        // 1. Build the millisecond sequence [on, off, on, off...]
+        val onOffSequence = mutableListOf<Short>()
+        val repeatCount = pattern.repeatCount.coerceIn(1, 10)
+        val pulseMs = pattern.pulseMs.coerceIn(60, 2000)
+        val pauseMs = pattern.pauseMs.coerceIn(60, 2000)
+
+        when (pattern.type) {
+            PatternType.CRESCENDO -> {
+                for (i in 0 until repeatCount) {
+                    val stepPulse = (pulseMs * (0.6f + 0.4f * (i + 1) / repeatCount)).toInt().toShort()
+                    onOffSequence.add(stepPulse)
+                    onOffSequence.add(pauseMs.toShort())
+                }
+            }
+            PatternType.HEARTBEAT -> {
+                for (i in 0 until repeatCount) {
+                    onOffSequence.add(120.toShort())
+                    onOffSequence.add(120.toShort())
+                    onOffSequence.add(180.toShort())
+                    onOffSequence.add(pauseMs.coerceAtLeast(600).toShort())
+                }
+            }
+            else -> {
+                for (i in 0 until repeatCount) {
+                    onOffSequence.add(pulseMs.toShort())
+                    onOffSequence.add(pauseMs.toShort())
+                }
+            }
+        }
+
+        // 2. Try native 2021 custom vibration pattern first (silent, no call screen, accurate pulse count)
+        if (use2021Protocol) {
+            val sent = sendNativeVibrationPattern(onOffSequence, notifType = 0x09, test = true)
+            if (sent) {
+                val totalDurationMs = onOffSequence.sumOf { it.toLong() }
+                vibrationJob = scope.launch(Dispatchers.IO) {
+                    isVibrating = true
+                    try {
+                        delay(totalDurationMs + 100L)
+                    } finally {
+                        isVibrating = false
+                        onComplete?.invoke()
+                    }
+                }
+                return
+            }
+        }
+
+        // 3. Fallback for non-2021 devices: software timed loop
         vibrationJob = scope.launch(Dispatchers.IO) {
             isVibrating = true
             try {
-                val repeatCount = pattern.repeatCount.coerceIn(1, 10)
-                val pulseMs = pattern.pulseMs.toLong().coerceIn(80L, 2000L)
-                val pauseMs = pattern.pauseMs.toLong().coerceIn(60L, 2000L)
-
-                for (r in 0 until repeatCount) {
+                for (i in 0 until onOffSequence.size step 2) {
                     if (!isActive) break
-                    startMotorVibration(pulseMs.toInt())
-                    delay(pulseMs)
+                    val onDuration = onOffSequence[i].toLong()
+                    startMotorVibration(onDuration.toInt())
+                    delay(onDuration)
                     stopMotorVibration()
-                    if (r < repeatCount - 1) {
-                        delay(pauseMs)
+                    if (i + 1 < onOffSequence.size) {
+                        val offDuration = onOffSequence[i + 1].toLong()
+                        delay(offDuration)
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Error in custom vibration job", e)
+                Log.e(TAG, "Error in custom vibration fallback job", e)
             } finally {
                 stopMotorVibration()
                 isVibrating = false
@@ -1073,7 +1192,25 @@ class MiBandBleManager(
 
     fun triggerCadenceVibration(cadenceType: VibrationCadenceType) {
         val pattern = VibrationCadenceProfiles.getPattern(cadenceType)
-        vibrationJob?.cancel()
+        stopVibration()
+
+        val onOffSequence = pattern.sequenceMs.map { it.toShort() }
+        if (use2021Protocol) {
+            val sent = sendNativeVibrationPattern(onOffSequence, notifType = 0x09, test = true)
+            if (sent) {
+                val totalDurationMs = pattern.sequenceMs.sum()
+                vibrationJob = scope.launch(Dispatchers.IO) {
+                    isVibrating = true
+                    try {
+                        delay(totalDurationMs + 100L)
+                    } finally {
+                        isVibrating = false
+                    }
+                }
+                return
+            }
+        }
+
         vibrationJob = scope.launch(Dispatchers.IO) {
             isVibrating = true
             try {

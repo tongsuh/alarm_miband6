@@ -239,7 +239,7 @@ fun UnifiedSettingsDialog(
                                     }
 
                                     Text(
-                                        text = if (metrics.isHrStreaming) "● 连续测定中 (1Hz)" else "常规间隔监测 (待机)",
+                                        text = if (metrics.isHrStreaming) "● 连续测定中 (1Hz)" else "常规间隔监测",
                                         fontSize = 11.sp,
                                         color = if (metrics.isHrStreaming) HeartRateRed else DarkTextTertiary
                                     )
@@ -260,7 +260,7 @@ fun UnifiedSettingsDialog(
                                         color = HeartRateRed
                                     )
                                     Text(
-                                        text = if (metrics.isHrStreaming) "BPM / 实时脉搏" else "BPM / 最近测量 (非实时)",
+                                        text = if (metrics.isHrStreaming) "BPM / 实时脉搏" else "BPM / 最近一次",
                                         fontSize = 12.sp,
                                         color = DarkTextSecondary
                                     )
@@ -321,7 +321,7 @@ fun UnifiedSettingsDialog(
                                         )
                                         Spacer(modifier = Modifier.width(8.dp))
                                         Text(
-                                            text = "三轴加速度计体动",
+                                            text = "加速度计",
                                             fontSize = 13.sp,
                                             fontWeight = FontWeight.SemiBold,
                                             color = DarkTextPrimary
@@ -329,7 +329,7 @@ fun UnifiedSettingsDialog(
                                     }
 
                                     val movementDesc = when {
-                                        !metrics.isMotionStreaming -> "未激活体动流"
+                                        !metrics.isMotionStreaming -> "待机"
                                         metrics.actigraphyG < 0.035f -> "静止"
                                         metrics.actigraphyG < 0.14f -> "轻度微动"
                                         else -> "大幅体动/翻身"
@@ -356,7 +356,7 @@ fun UnifiedSettingsDialog(
                                         color = MiBandCyan
                                     )
                                     Text(
-                                        text = if (metrics.isMotionStreaming) "动量流活跃 (25Hz)" else "动量流待机",
+                                        text = if (metrics.isMotionStreaming) "实时检测中" else "待机",
                                         fontSize = 11.sp,
                                         color = if (metrics.isMotionStreaming) MiBandCyan else DarkTextTertiary
                                     )
@@ -367,8 +367,13 @@ fun UnifiedSettingsDialog(
                                 Button(
                                     onClick = {
                                         if (connectionState == BleConnectionState.CONNECTED) {
-                                            bleManager.enableSensorNotifications()
-                                            Toast.makeText(context, "已向手环发送三轴体动监测激活指令", Toast.LENGTH_SHORT).show()
+                                            val isStreaming = metrics.isMotionStreaming
+                                            bleManager.enableSensorNotifications(resetBaseline = isStreaming)
+                                            Toast.makeText(
+                                                context,
+                                                if (isStreaming) "已重置加速度计检测基准" else "已启动加速度计检测",
+                                                Toast.LENGTH_SHORT
+                                            ).show()
                                         } else {
                                             Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
                                         }
@@ -380,7 +385,7 @@ fun UnifiedSettingsDialog(
                                     )
                                 ) {
                                     Text(
-                                        text = if (metrics.isMotionStreaming) "重新校准 / 激活体动流" else "启动三轴体动监测",
+                                        text = if (metrics.isMotionStreaming) "重置检测基准" else "启动检测",
                                         fontSize = 12.sp,
                                         color = if (metrics.isMotionStreaming) Color.White else Color.Black,
                                         fontWeight = FontWeight.SemiBold
@@ -519,7 +524,7 @@ fun UnifiedSettingsDialog(
 
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "说明：手环马达为恒压驱动，通过调节脉冲时长与间隔节奏实现微调。",
+                                    text = "说明：采用华米原生硬件震动引擎，由手环独立定时器精准播放节奏，无屏幕弹窗且绝不丢脉冲。",
                                     fontSize = 10.sp,
                                     color = DarkTextTertiary,
                                     lineHeight = 14.sp

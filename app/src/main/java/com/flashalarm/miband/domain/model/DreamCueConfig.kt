@@ -1,10 +1,12 @@
 package com.flashalarm.miband.domain.model
 
 enum class PatternType(val displayName: String) {
-    CRESCENDO("渐强唤醒"),
-    DECRESCENDO("渐弱轻拂"),
-    HEARTBEAT("拟真心跳"),
+    WATERDROP("水滴轻触"),
+    SHORT("轻柔微律"),
     STEADY("恒定微震"),
+    CRESCENDO("阶梯渐强"),
+    HEARTBEAT("拟真心跳"),
+    DECRESCENDO("渐弱轻拂"),
     PULSE_WAVE("律动波浪");
 }
 
@@ -22,7 +24,7 @@ data class CustomizableVibrationPattern(
 
 data class DreamCueConfig(
     // 1. Current active vibration profile
-    val activePatternId: String = "crescendo",
+    val activePatternId: String = "waterdrop",
     val patterns: List<CustomizableVibrationPattern> = defaultPatterns(),
 
     // 2. Dual Channels (Vibration & Audio Decoupling)
@@ -51,14 +53,48 @@ data class DreamCueConfig(
         fun defaultPatterns(): List<CustomizableVibrationPattern> {
             return listOf(
                 CustomizableVibrationPattern(
+                    id = "waterdrop",
+                    name = "水滴轻触 (推荐)",
+                    type = PatternType.WATERDROP,
+                    startIntensityPercent = 20,
+                    endIntensityPercent = 20,
+                    pulseMs = 100,
+                    pauseMs = 1200,
+                    durationSeconds = 15,
+                    repeatCount = 3
+                ),
+                CustomizableVibrationPattern(
+                    id = "short",
+                    name = "轻柔微律",
+                    type = PatternType.SHORT,
+                    startIntensityPercent = 35,
+                    endIntensityPercent = 35,
+                    pulseMs = 160,
+                    pauseMs = 250,
+                    durationSeconds = 15,
+                    repeatCount = 3
+                ),
+                CustomizableVibrationPattern(
+                    id = "steady",
+                    name = "恒定微震",
+                    type = PatternType.STEADY,
+                    startIntensityPercent = 40,
+                    endIntensityPercent = 40,
+                    pulseMs = 200,
+                    pauseMs = 300,
+                    durationSeconds = 15,
+                    repeatCount = 3
+                ),
+                CustomizableVibrationPattern(
                     id = "crescendo",
-                    name = "渐强唤醒 (推荐)",
+                    name = "阶梯渐强",
                     type = PatternType.CRESCENDO,
                     startIntensityPercent = 20,
                     endIntensityPercent = 80,
                     pulseMs = 150,
                     pauseMs = 250,
-                    durationSeconds = 20
+                    durationSeconds = 20,
+                    repeatCount = 4
                 ),
                 CustomizableVibrationPattern(
                     id = "heartbeat",
@@ -67,28 +103,9 @@ data class DreamCueConfig(
                     startIntensityPercent = 40,
                     endIntensityPercent = 60,
                     pulseMs = 120,
-                    pauseMs = 600,
-                    durationSeconds = 15
-                ),
-                CustomizableVibrationPattern(
-                    id = "decrescendo",
-                    name = "渐弱轻拂",
-                    type = PatternType.DECRESCENDO,
-                    startIntensityPercent = 75,
-                    endIntensityPercent = 20,
-                    pulseMs = 150,
-                    pauseMs = 250,
-                    durationSeconds = 15
-                ),
-                CustomizableVibrationPattern(
-                    id = "steady",
-                    name = "恒定微律",
-                    type = PatternType.STEADY,
-                    startIntensityPercent = 40,
-                    endIntensityPercent = 40,
-                    pulseMs = 100,
-                    pauseMs = 200,
-                    durationSeconds = 15
+                    pauseMs = 700,
+                    durationSeconds = 15,
+                    repeatCount = 3
                 )
             )
         }
