@@ -97,6 +97,14 @@ fun UnifiedSettingsDialog(
     var isTestingAudio by remember { mutableStateOf(false) }
     var isTestingVibration by remember { mutableStateOf(false) }
     var newProtocolEnabled by remember { mutableStateOf(use2021Protocol) }
+    var isHrToggling by remember { mutableStateOf(false) }
+
+    LaunchedEffect(isHrToggling) {
+        if (isHrToggling) {
+            delay(500L)
+            isHrToggling = false
+        }
+    }
 
     val tabs = listOf("传感器测试", "震动工坊", "声音设置", "认证协议")
 
@@ -261,11 +269,15 @@ fun UnifiedSettingsDialog(
                                 Button(
                                     onClick = {
                                         if (connectionState == BleConnectionState.CONNECTED) {
-                                            bleManager.setHeartRateStreamingMode(!metrics.isHrStreaming)
+                                            if (!isHrToggling) {
+                                                isHrToggling = true
+                                                bleManager.setHeartRateStreamingMode(!metrics.isHrStreaming)
+                                            }
                                         } else {
                                             Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
                                         }
                                     },
+                                    enabled = !isHrToggling,
                                     modifier = Modifier.fillMaxWidth().height(36.dp),
                                     shape = RoundedCornerShape(8.dp),
                                     colors = ButtonDefaults.buttonColors(
@@ -273,7 +285,7 @@ fun UnifiedSettingsDialog(
                                     )
                                 ) {
                                     Text(
-                                        text = if (metrics.isHrStreaming) "停止连续心率测定" else "开启连续心率测定",
+                                        text = if (isHrToggling) "正在发送指令..." else if (metrics.isHrStreaming) "停止连续心率测定" else "开启连续心率测定",
                                         fontSize = 12.sp,
                                         color = Color.White
                                     )

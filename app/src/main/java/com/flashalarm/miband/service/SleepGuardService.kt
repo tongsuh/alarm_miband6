@@ -76,6 +76,24 @@ class SleepGuardService : Service() {
         super.onCreate()
         createNotificationChannel()
         acquireWakeLock()
+
+        // Immediate promotion to foreground service in onCreate to guarantee system 5-second FGS contract
+        val notification = buildNotification("正在监测睡眠体动与心率...")
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Initial startForeground with type failed, falling back to untyped", e)
+            try {
+                @Suppress("DEPRECATION")
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (e2: Exception) {
+                Log.e(TAG, "Fatal startForeground error in onCreate", e2)
+            }
+        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -106,37 +124,20 @@ class SleepGuardService : Service() {
         val app = applicationContext as FlashAlarmApp
         val notification = buildNotification("正在监测睡眠体动与心率...")
 
-        // Android 14 (API 34) Foreground Service Permission Safety:
-        // Starting with type MICROPHONE without RECORD_AUDIO permission throws SecurityException!
         val hasAudioPermission = ContextCompat.checkSelfPermission(
             this,
             Manifest.permission.RECORD_AUDIO
         ) == PackageManager.PERMISSION_GRANTED
         val enableAudio = app.userPreferencesRepository.cueConfig.value.enableAudioVerification && hasAudioPermission
 
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            var foregroundType = ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && enableAudio) {
-                foregroundType = foregroundType or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            }
-            try {
-                startForeground(NOTIFICATION_ID, notification, foregroundType)
-            } catch (e: SecurityException) {
-                Log.w(TAG, "Failed to start with microphone type, falling back to connectedDevice only", e)
-                try {
-                    startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
-                } catch (e2: Exception) {
-                    Log.e(TAG, "Failed to start connectedDevice foreground service", e2)
-                }
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start foreground service", e)
-            }
-        } else {
-            try {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+            } else {
                 startForeground(NOTIFICATION_ID, notification)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to start foreground service", e)
             }
+        } catch (e: Exception) {
+            Log.w(TAG, "startForeground update failed", e)
         }
 
         _isServiceRunning.value = true
@@ -152,14 +153,16 @@ class SleepGuardService : Service() {
             app.remEngine.updateConfig(config)
             app.remEngine.startSession()
 
-            // 3. Connect BLE if disconnected
+            // 3. Connect BLE ONLY if not already connected (do not disconnect active session!)
             val prefs = app.userPreferencesRepository
             val targetMac = prefs.getDeviceMac()
             val authKey = prefs.getAuthKeyHex()
             val use2021 = prefs.getUse2021Protocol()
             if (targetMac.isNotBlank()) {
-                app.bleManager.setTargetDevice("Mi Smart Band 6", targetMac, authKey, use2021)
-                app.bleManager.startScanAndConnect(targetMac)
+                if (app.bleManager.connectionState.value != com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
+                    app.bleManager.setTargetDevice("Mi Smart Band 6", targetMac, authKey, use2021)
+                    app.bleManager.startScanAndConnect(targetMac)
+                }
             }
 
             // 4. Start Audio Analyzer if configured and permitted

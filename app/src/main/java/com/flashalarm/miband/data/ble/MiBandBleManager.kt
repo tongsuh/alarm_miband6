@@ -96,6 +96,14 @@ class MiBandBleManager(
     private var hrKeepAliveJob: Job? = null
     private var vibrationJob: Job? = null
     private var isVibrating = false
+    private var isHrToggleBusy = false
+
+    // Actigraphy differential state
+    private var prevX = 0f
+    private var prevY = 0f
+    private var prevZ = 0f
+    private var hasPrevSample = false
+    private var smoothedActigraphy = 0f
 
     fun setTargetDevice(name: String, mac: String, authKeyHex: String, use2021: Boolean = true) {
         this.use2021Protocol = use2021
@@ -653,31 +661,49 @@ class MiBandBleManager(
     }
 
     private fun parseActigraphyData(data: ByteArray) {
-        if (data.size < 4) return
+        if (data.size < 6) return
         try {
-            var offset = 0
+            // Standard Mi Band raw sensor packet (20 bytes): 2-byte sequence header + 3x 6-byte samples
+            var offset = if (data.size % 6 == 2) 2 else 0
             var sumMovement = 0.0f
             var sampleCount = 0
 
             while (offset + 6 <= data.size) {
-                val x = (data[offset].toInt() and 0xFF) or (data[offset + 1].toInt() shl 8)
-                val y = (data[offset + 2].toInt() and 0xFF) or (data[offset + 3].toInt() shl 8)
-                val z = (data[offset + 4].toInt() and 0xFF) or (data[offset + 5].toInt() shl 8)
+                // Correct 16-bit signed integer extraction
+                val rawX = (data[offset].toInt() and 0xFF) or ((data[offset + 1].toInt() and 0xFF) shl 8)
+                val rawY = (data[offset + 2].toInt() and 0xFF) or ((data[offset + 3].toInt() and 0xFF) shl 8)
+                val rawZ = (data[offset + 4].toInt() and 0xFF) or ((data[offset + 5].toInt() and 0xFF) shl 8)
 
-                val normX = x / 4096.0f
-                val normY = y / 4096.0f
-                val normZ = z / 4096.0f
+                val x = rawX.toShort().toFloat()
+                val y = rawY.toShort().toFloat()
+                val z = rawZ.toShort().toFloat()
 
-                val vm = sqrt(normX * normX + normY * normY + normZ * normZ)
-                val delta = kotlin.math.abs(vm - 1.0f)
-                sumMovement += delta
-                sampleCount++
+                if (hasPrevSample) {
+                    val dx = (x - prevX) / 4096.0f
+                    val dy = (y - prevY) / 4096.0f
+                    val dz = (z - prevZ) / 4096.0f
+                    val jerk = sqrt(dx * dx + dy * dy + dz * dz)
+                    sumMovement += jerk
+                    sampleCount++
+                } else {
+                    hasPrevSample = true
+                }
+
+                prevX = x
+                prevY = y
+                prevZ = z
                 offset += 6
             }
 
             val avgMagnitude = if (sampleCount > 0) sumMovement / sampleCount else 0.0f
-            _deviceMetrics.value = _deviceMetrics.value.copy(actigraphyG = avgMagnitude)
-            _actigraphyFlow.tryEmit(avgMagnitude)
+            // Exponential smoothing to eliminate digital jitter
+            smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) avgMagnitude else (smoothedActigraphy * 0.65f + avgMagnitude * 0.35f)
+
+            _deviceMetrics.value = _deviceMetrics.value.copy(
+                actigraphyG = smoothedActigraphy,
+                isMotionStreaming = true
+            )
+            _actigraphyFlow.tryEmit(smoothedActigraphy)
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing actigraphy sensor bytes", e)
         }
@@ -694,39 +720,37 @@ class MiBandBleManager(
     }
 
     fun setHeartRateStreamingMode(isContinuous: Boolean) {
-        if (isContinuous) {
-            if (use2021Protocol) {
-                // 2021 firmware: send HR start via chunked endpoint 0x001D
-                val payload = BleConstants.HR_START_CONTINUOUS
-                val chunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, payload)
-                scope.launch(Dispatchers.IO) {
-                    for (chunk in chunks) {
-                        delay(40L)
-                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
-                    }
+        if (isHrToggleBusy) {
+            Log.w(TAG, "setHeartRateStreamingMode: toggle busy, skipping rapid invocation")
+            return
+        }
+        isHrToggleBusy = true
+        scope.launch(Dispatchers.IO) {
+            try {
+                if (isContinuous) {
+                    Log.i(TAG, "Enabling continuous heart rate streaming...")
+                    // 1. Ensure manual measurement is stopped first
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, byteArrayOf(0x15, 0x02, 0x00))
+                    delay(80L)
+                    // 2. Start continuous heart rate measurement
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+                    delay(80L)
+                    startHrKeepAlive()
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = true)
+                } else {
+                    Log.i(TAG, "Stopping continuous heart rate streaming...")
+                    hrKeepAliveJob?.cancel()
+                    hrKeepAliveJob = null
+                    // Stop continuous measurement
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_STOP_CONTINUOUS)
+                    delay(80L)
+                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, byteArrayOf(0x15, 0x02, 0x00))
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
                 }
-            } else {
-                writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+            } finally {
+                delay(300L) // Debounce window
+                isHrToggleBusy = false
             }
-            startHrKeepAlive()
-        } else {
-            hrKeepAliveJob?.cancel()
-            hrKeepAliveJob = null
-            if (use2021Protocol) {
-                // 2021 firmware: send HR stop via chunked endpoint 0x001D
-                val payload = BleConstants.HR_STOP_CONTINUOUS
-                val chunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, payload)
-                scope.launch(Dispatchers.IO) {
-                    for (chunk in chunks) {
-                        delay(40L)
-                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
-                    }
-                }
-            } else {
-                writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_STOP_CONTINUOUS)
-            }
-            // Explicitly reset streaming state so the UI updates immediately
-            _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
         }
     }
 
@@ -832,8 +856,8 @@ class MiBandBleManager(
                     }.coerceIn(10, 100)
 
                     val alertLevel = if (currentIntensity > 50) 0x02 else 0x01
-                    val dutyCycle = (currentIntensity / 100f).coerceIn(0.15f, 1.0f)
-                    val onTimeMs = (pattern.pulseMs * dutyCycle).toLong().coerceAtLeast(30L)
+                    val dutyCycle = (currentIntensity / 100f).coerceIn(0.2f, 1.0f)
+                    val onTimeMs = (pattern.pulseMs * dutyCycle).toLong().coerceAtLeast(80L)
                     val offTimeMs = (pattern.pulseMs - onTimeMs).coerceAtLeast(0L)
 
                     writeAlertLevel(alertLevel)
@@ -845,13 +869,13 @@ class MiBandBleManager(
                     }
 
                     if (pattern.type == PatternType.HEARTBEAT) {
-                        delay(80L)
-                        writeAlertLevel(0x01)
-                        delay((onTimeMs * 0.7f).toLong().coerceAtLeast(30L))
+                        delay(100L)
+                        writeAlertLevel(0x02)
+                        delay((onTimeMs * 0.7f).toLong().coerceAtLeast(80L))
                         writeAlertLevel(0x00)
                     }
 
-                    delay(pattern.pauseMs.toLong().coerceAtLeast(50L))
+                    delay(pattern.pauseMs.toLong().coerceAtLeast(80L))
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in custom vibration job", e)
@@ -875,7 +899,7 @@ class MiBandBleManager(
                     val isVibrateStep = (i % 2 == 0)
 
                     if (isVibrateStep) {
-                        writeAlertLevel(0x01)
+                        writeAlertLevel(0x02)
                     } else {
                         writeAlertLevel(0x00)
                     }
@@ -896,22 +920,33 @@ class MiBandBleManager(
     }
 
     private fun writeAlertLevel(level: Int) {
-        val vibrateFlag: Byte = if (level > 0) 0x01 else 0x00
+        val startVibration = level > 0
+
         if (use2021Protocol) {
-            // 2021 firmware: use chunked protocol FIND_DEVICE endpoint (0x001A)
-            val chunks1 = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE, byteArrayOf(vibrateFlag))
-            val chunks2 = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE, byteArrayOf(0x03, vibrateFlag))
+            // 1. Official 2021 Chunked Endpoint 0x001A (FIND_DEVICE):
+            // FIND_BAND_START = 0x03, FIND_BAND_STOP_FROM_PHONE = 0x06
+            val cmdByte = if (startVibration) 0x03.toByte() else 0x06.toByte()
+            val findChunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE, byteArrayOf(cmdByte))
+
+            // 2. Mi Band 6 Call notification vibration packet (Gadgetbridge MiBand6Support technique):
+            val callPayload = if (startVibration) {
+                byteArrayOf(3, 0, 0, 0, 0, 0, 'D'.code.toByte(), 'r'.code.toByte(), 'e'.code.toByte(), 'a'.code.toByte(), 'm'.code.toByte(), 0, 0, 0, 2)
+            } else {
+                byteArrayOf(3, 3, 0, 0, 0, 0)
+            }
+            val callChunks = chunkedEncoder.encode(0x0090.toShort(), callPayload)
+
             scope.launch(Dispatchers.IO) {
-                for (chunk in chunks1) {
+                for (chunk in findChunks) {
                     writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
                 }
-                for (chunk in chunks2) {
+                for (chunk in callChunks) {
                     writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
                 }
             }
         }
 
-        // Multi-layer insurance: also write Immediate Alert Service (0x1802)
+        // 3. Multi-layer insurance: also write standard Immediate Alert Service (0x1802 / 0x2A06)
         val gatt = bluetoothGatt ?: return
         var service = gatt.getService(BleConstants.UUID_SERVICE_IMMEDIATE_ALERT)
         var char = service?.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
@@ -927,7 +962,7 @@ class MiBandBleManager(
         }
 
         if (char != null) {
-            val data = byteArrayOf(level.toByte())
+            val data = byteArrayOf(if (startVibration) 0x02 else 0x00)
             char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)

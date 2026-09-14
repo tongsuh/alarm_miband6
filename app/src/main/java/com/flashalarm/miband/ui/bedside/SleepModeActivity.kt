@@ -69,22 +69,34 @@ class SleepModeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            setShowWhenLocked(true)
-            setTurnScreenOn(true)
+        try {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                setShowWhenLocked(true)
+                setTurnScreenOn(true)
+            }
+        } catch (e: Exception) {
+            android.util.Log.w("SleepModeActivity", "Failed setting window lock screen flags", e)
         }
 
-        hideSystemBars()
+        try {
+            hideSystemBars()
+        } catch (e: Exception) {
+            android.util.Log.w("SleepModeActivity", "Failed hiding system bars", e)
+        }
 
         setContent {
             FlashAlarmTheme {
                 SleepModeScreen(
                     onStopSleepGuard = {
-                        val stopIntent = Intent(this, SleepGuardService::class.java).apply {
-                            action = SleepGuardService.ACTION_STOP_GUARD
+                        try {
+                            val stopIntent = Intent(this, SleepGuardService::class.java).apply {
+                                action = SleepGuardService.ACTION_STOP_GUARD
+                            }
+                            startService(stopIntent)
+                        } catch (e: Exception) {
+                            android.util.Log.e("SleepModeActivity", "Failed stopping service", e)
                         }
-                        startService(stopIntent)
                         finish()
                     }
                 )
