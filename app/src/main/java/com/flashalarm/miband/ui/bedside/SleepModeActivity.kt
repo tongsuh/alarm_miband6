@@ -259,7 +259,7 @@ fun SleepModeScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (metrics.actigraphyG > 0.05f) "翻身中" else "肌肉静息",
+                        text = if (metrics.actigraphyG > 0.05f) "翻身中" else "静止",
                         fontSize = 14.sp,
                         color = DarkTextSecondary
                     )

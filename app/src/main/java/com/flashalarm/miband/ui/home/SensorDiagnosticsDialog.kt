@@ -306,14 +306,15 @@ fun SensorDiagnosticsDialog(
                             }
 
                             val movementDesc = when {
-                                metrics.actigraphyG < 0.035f -> "肌肉静止(深度/REM)"
-                                metrics.actigraphyG < 0.14f -> "微动"
-                                else -> "翻身(一票否决)"
+                                !metrics.isMotionStreaming -> "未激活体动流"
+                                metrics.actigraphyG < 0.035f -> "静止"
+                                metrics.actigraphyG < 0.14f -> "轻度微动"
+                                else -> "大幅体动/翻身"
                             }
                             Text(
                                 text = movementDesc,
                                 fontSize = 11.sp,
-                                color = if (metrics.actigraphyG > 0.14f) HeartRateRed else MiBandCyan
+                                color = if (!metrics.isMotionStreaming) DarkTextTertiary else if (metrics.actigraphyG > 0.14f) HeartRateRed else MiBandCyan
                             )
                         }
 

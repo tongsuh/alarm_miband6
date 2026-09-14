@@ -330,7 +330,7 @@ fun UnifiedSettingsDialog(
 
                                     val movementDesc = when {
                                         !metrics.isMotionStreaming -> "未激活体动流"
-                                        metrics.actigraphyG < 0.035f -> "肌肉松弛(REM/深睡)"
+                                        metrics.actigraphyG < 0.035f -> "静止"
                                         metrics.actigraphyG < 0.14f -> "轻度微动"
                                         else -> "大幅体动/翻身"
                                     }
@@ -478,14 +478,14 @@ fun UnifiedSettingsDialog(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("总震动时长", fontSize = 12.sp, color = DarkTextSecondary)
-                                    Text("${currentPattern.durationSeconds} 秒", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                                    Text("脉冲循环次数", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("${currentPattern.repeatCount} 次", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
                                 }
                                 Slider(
-                                    value = currentPattern.durationSeconds.toFloat(),
-                                    onValueChange = { updateCurrentPattern { p -> p.copy(durationSeconds = it.toInt()) } },
-                                    valueRange = 2f..15f,
-                                    steps = 12,
+                                    value = currentPattern.repeatCount.toFloat(),
+                                    onValueChange = { updateCurrentPattern { p -> p.copy(repeatCount = it.toInt()) } },
+                                    valueRange = 1f..10f,
+                                    steps = 8,
                                     colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
                                 )
 
@@ -493,41 +493,13 @@ fun UnifiedSettingsDialog(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("起始强度 (PWM占空比)", fontSize = 12.sp, color = DarkTextSecondary)
-                                    Text("${currentPattern.startIntensityPercent}%", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
-                                }
-                                Slider(
-                                    value = currentPattern.startIntensityPercent.toFloat(),
-                                    onValueChange = { updateCurrentPattern { p -> p.copy(startIntensityPercent = it.toInt()) } },
-                                    valueRange = 10f..100f,
-                                    colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text("结束强度 (渐变目标)", fontSize = 12.sp, color = DarkTextSecondary)
-                                    Text("${currentPattern.endIntensityPercent}%", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
-                                }
-                                Slider(
-                                    value = currentPattern.endIntensityPercent.toFloat(),
-                                    onValueChange = { updateCurrentPattern { p -> p.copy(endIntensityPercent = it.toInt()) } },
-                                    valueRange = 10f..100f,
-                                    colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
-                                )
-
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Text("脉冲微震持续", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("单次脉冲时长", fontSize = 12.sp, color = DarkTextSecondary)
                                     Text("${currentPattern.pulseMs} ms", fontSize = 12.sp, color = MiBandCyan, fontWeight = FontWeight.Bold)
                                 }
                                 Slider(
                                     value = currentPattern.pulseMs.toFloat(),
                                     onValueChange = { updateCurrentPattern { p -> p.copy(pulseMs = it.toInt()) } },
-                                    valueRange = 50f..500f,
+                                    valueRange = 80f..1000f,
                                     colors = SliderDefaults.colors(thumbColor = MiBandCyan, activeTrackColor = MiBandCyan)
                                 )
 
@@ -535,14 +507,22 @@ fun UnifiedSettingsDialog(
                                     modifier = Modifier.fillMaxWidth(),
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
-                                    Text("间隔休眠", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("脉冲间隔休眠", fontSize = 12.sp, color = DarkTextSecondary)
                                     Text("${currentPattern.pauseMs} ms", fontSize = 12.sp, color = AlertPurple, fontWeight = FontWeight.Bold)
                                 }
                                 Slider(
                                     value = currentPattern.pauseMs.toFloat(),
                                     onValueChange = { updateCurrentPattern { p -> p.copy(pauseMs = it.toInt()) } },
-                                    valueRange = 50f..1000f,
+                                    valueRange = 80f..1000f,
                                     colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
+                                )
+
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "说明：手环马达为恒压驱动，通过调节脉冲时长与间隔节奏实现微调。",
+                                    fontSize = 10.sp,
+                                    color = DarkTextTertiary,
+                                    lineHeight = 14.sp
                                 )
 
                                 Spacer(modifier = Modifier.height(8.dp))

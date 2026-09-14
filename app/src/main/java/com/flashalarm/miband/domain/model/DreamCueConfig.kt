@@ -16,7 +16,8 @@ data class CustomizableVibrationPattern(
     val endIntensityPercent: Int = 80,   // 10% - 100%
     val pulseMs: Int = 120,              // 50ms - 500ms
     val pauseMs: Int = 250,              // 50ms - 1000ms
-    val durationSeconds: Int = 15        // 5s - 300s (up to 5 min!)
+    val durationSeconds: Int = 15,       // 5s - 300s (up to 5 min!)
+    val repeatCount: Int = 3             // 1 - 10 times
 )
 
 data class DreamCueConfig(

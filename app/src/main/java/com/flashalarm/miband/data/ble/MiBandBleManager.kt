@@ -427,16 +427,6 @@ class MiBandBleManager(
                     delay(150L)
                     writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
                     startHrKeepAlive()
-                    delay(150L)
-                    gatt?.let { enableSensorNotifications(it) }
-                }
-            } else if (charUuid == BleConstants.UUID_CHAR_SENSOR_DATA || charUuid == BleConstants.UUID_CHAR_SENSOR_CTRL) {
-                scope.launch(Dispatchers.IO) {
-                    delay(150L)
-                    Log.i(TAG, "Sensor notification ready, sending CMD_RAW_SENSOR_START_1 & 3...")
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_1)
-                    delay(150L)
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_3)
                 }
             }
         }
@@ -613,6 +603,10 @@ class MiBandBleManager(
             BleConstants.UUID_CHAR_SENSOR_DATA -> {
                 parseActigraphyData(value)
             }
+
+            BleConstants.UUID_CHAR_REALTIME_STEPS -> {
+                parseRealtimeStepsData(value)
+            }
         }
     }
 
@@ -632,42 +626,109 @@ class MiBandBleManager(
             Log.w(TAG, "enableSensorNotifications: bluetoothGatt is null")
             return
         }
+        _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
         scope.launch(Dispatchers.IO) {
             var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
             var sensorDataChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
             var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+            var stepsChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_REALTIME_STEPS)
 
-            if (sensorDataChar == null || sensorCtrlChar == null) {
+            if (sensorDataChar == null || sensorCtrlChar == null || stepsChar == null) {
                 for (s in g.services) {
                     if (sensorDataChar == null) sensorDataChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
                     if (sensorCtrlChar == null) sensorCtrlChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                    if (stepsChar == null) stepsChar = s.getCharacteristic(BleConstants.UUID_CHAR_REALTIME_STEPS)
                 }
             }
 
-            // 1. Enable CCCD on 0x0001 (Control) so band can deliver handshake responses
-            if (sensorCtrlChar != null) {
-                Log.i(TAG, "Enabling sensor control notification on 0x0001...")
-                enableNotification(g, sensorCtrlChar)
-                delay(200L)
-            }
-
-            // 2. Enable CCCD on 0x0002 (Data) for raw 25Hz accelerometer streaming
+            // 1. Enable CCCD on 0x0002 (Data) for raw 25Hz accelerometer streaming
             if (sensorDataChar != null) {
                 Log.i(TAG, "Enabling sensor data notification on 0x0002...")
                 enableNotification(g, sensorDataChar)
-                delay(200L)
+                delay(250L)
             }
 
-            // 3. Send Huami 2021 raw sensor sequence:
-            // CMD_RAW_SENSOR_START_1: [0x01, 0x03, 0x19] (Sensor 3 Accel, 25Hz)
-            // CMD_RAW_SENSOR_START_3: [0x02] (Trigger stream)
+            // 2. Enable CCCD on 0x0007 (Realtime steps & movement)
+            if (stepsChar != null) {
+                Log.i(TAG, "Enabling realtime steps notification on 0x0007...")
+                enableNotification(g, stepsChar)
+                delay(250L)
+            }
+
+            // 3. Enable CCCD on 0x0001 (Control)
+            if (sensorCtrlChar != null) {
+                Log.i(TAG, "Enabling sensor control notification on 0x0001...")
+                enableNotification(g, sensorCtrlChar)
+                delay(250L)
+            }
+
+            // 4. Send Huami raw sensor sequence with WRITE_TYPE_NO_RESPONSE
             if (sensorCtrlChar != null) {
                 Log.i(TAG, "Sending CMD_RAW_SENSOR_START_1 [0x01, 0x03, 0x19] to 0x0001...")
-                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_1)
+                writeRawSensorCommand(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_1)
                 delay(150L)
                 Log.i(TAG, "Sending CMD_RAW_SENSOR_START_3 [0x02] trigger to 0x0001...")
-                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_3)
+                writeRawSensorCommand(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
+                delay(150L)
             }
+
+            // 5. If 2021 protocol, also enable realtime steps on endpoint 0x0016
+            if (use2021Protocol) {
+                try {
+                    val stepsPayload = byteArrayOf(BleConstants.STEPS_CMD_ENABLE_REALTIME) // 0x05
+                    val chunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_STEPS, stepsPayload, extendedFlags = true, encrypt = true)
+                    for (chunk in chunks) {
+                        delay(35L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed enabling 2021 realtime steps stream", e)
+                }
+            }
+        }
+    }
+
+    private var lastStepsCount = -1
+
+    private fun parseRealtimeStepsData(data: ByteArray) {
+        if (data.isEmpty()) return
+        try {
+            val currentSteps = if (data.size >= 3) {
+                (data[1].toInt() and 0xFF) or ((data[2].toInt() and 0xFF) shl 8)
+            } else {
+                (data[0].toInt() and 0xFF)
+            }
+
+            val stepDelta = if (lastStepsCount >= 0) (currentSteps - lastStepsCount).coerceAtLeast(0) else 0
+            lastStepsCount = currentSteps
+
+            val movementG = when {
+                stepDelta >= 5 -> 0.35f
+                stepDelta > 0 -> 0.18f
+                else -> 0.015f
+            }
+
+            smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) movementG else (smoothedActigraphy * 0.7f + movementG * 0.3f)
+            _deviceMetrics.value = _deviceMetrics.value.copy(
+                actigraphyG = smoothedActigraphy,
+                isMotionStreaming = true
+            )
+            _actigraphyFlow.tryEmit(smoothedActigraphy)
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed parsing realtime steps data", e)
+        }
+    }
+
+    private fun writeRawSensorCommand(gatt: BluetoothGatt, char: BluetoothGattCharacteristic, data: ByteArray): Boolean {
+        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
+            status == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            char.value = data
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(char)
         }
     }
 
@@ -849,6 +910,135 @@ class MiBandBleManager(
         }
     }
 
+    private fun startMotorVibration(onTimeMs: Int = 300) {
+        // 1. Huami 2021 Chunked Protocol: Endpoint 0x0090 (CALL_INCOMING)
+        // Mi Band 6 ignores standard 0x001A and 0x2A06, but triggers physical motor via 2021 call notifications
+        if (use2021Protocol) {
+            try {
+                val callStartPayload = byteArrayOf(0x00, 0x00, 0xC0.toByte(), 0x00, 3, 0, 0, 0, 0, 0) +
+                        "DreamAlarm".toByteArray(Charsets.UTF_8) + byteArrayOf(0, 0, 0, 2)
+                val chunks = chunkedEncoder.encode(
+                    BleConstants.CHUNKED2021_ENDPOINT_COMPAT,
+                    callStartPayload,
+                    extendedFlags = true,
+                    encrypt = true
+                )
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in chunks) {
+                        delay(20L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed sending 2021 call start vibration chunk", e)
+            }
+
+            // Also send Find Band start (0x03) to 0x001A as auxiliary
+            try {
+                val findChunks = chunkedEncoder.encode(
+                    BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE,
+                    byteArrayOf(0x03),
+                    extendedFlags = true,
+                    encrypt = true
+                )
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in findChunks) {
+                        delay(20L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed sending 2021 find device start", e)
+            }
+        }
+
+        // 2. Immediate Alert Service (0x1802 / 0x2A06) as hardware fallback
+        bluetoothGatt?.let { gatt ->
+            var service = gatt.getService(BleConstants.UUID_SERVICE_IMMEDIATE_ALERT)
+            var char = service?.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
+            if (char == null) {
+                for (s in gatt.services) {
+                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
+                    if (c != null) {
+                        char = c
+                        break
+                    }
+                }
+            }
+            if (char != null) {
+                writeDirectImmediateAlert(gatt, char, byteArrayOf(BleConstants.ALERT_LEVEL_VIBRATE_ONLY))
+                val patternPacket = byteArrayOf(
+                    0xFF.toByte(),
+                    (onTimeMs and 0xFF).toByte(),
+                    ((onTimeMs shr 8) and 0xFF).toByte(),
+                    (100 and 0xFF).toByte(),
+                    0x00,
+                    1
+                )
+                writeDirectImmediateAlert(gatt, char, patternPacket)
+            }
+        }
+    }
+
+    private fun stopMotorVibration() {
+        // 1. Huami 2021 Chunked Protocol: Endpoint 0x0090 (CALL_STOP)
+        if (use2021Protocol) {
+            try {
+                val callStopPayload = byteArrayOf(0x00, 0x00, 0xC0.toByte(), 0x00, 3, 3, 0, 0, 0, 0)
+                val chunks = chunkedEncoder.encode(
+                    BleConstants.CHUNKED2021_ENDPOINT_COMPAT,
+                    callStopPayload,
+                    extendedFlags = true,
+                    encrypt = true
+                )
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in chunks) {
+                        delay(20L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed sending 2021 call stop vibration chunk", e)
+            }
+
+            // Also send Find Band stop (0x06) to 0x001A
+            try {
+                val findStopChunks = chunkedEncoder.encode(
+                    BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE,
+                    byteArrayOf(0x06),
+                    extendedFlags = true,
+                    encrypt = true
+                )
+                scope.launch(Dispatchers.IO) {
+                    for (chunk in findStopChunks) {
+                        delay(20L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                    }
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Failed sending 2021 find device stop", e)
+            }
+        }
+
+        // 2. Immediate Alert Service (0x1802 / 0x2A06)
+        bluetoothGatt?.let { gatt ->
+            var service = gatt.getService(BleConstants.UUID_SERVICE_IMMEDIATE_ALERT)
+            var char = service?.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
+            if (char == null) {
+                for (s in gatt.services) {
+                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
+                    if (c != null) {
+                        char = c
+                        break
+                    }
+                }
+            }
+            if (char != null) {
+                writeDirectImmediateAlert(gatt, char, byteArrayOf(BleConstants.ALERT_LEVEL_NONE))
+            }
+        }
+    }
+
     fun triggerCustomVibration(
         pattern: CustomizableVibrationPattern,
         onComplete: (() -> Unit)? = null
@@ -858,52 +1048,23 @@ class MiBandBleManager(
         vibrationJob = scope.launch(Dispatchers.IO) {
             isVibrating = true
             try {
-                val totalMs = pattern.durationSeconds * 1000L
-                val startTime = System.currentTimeMillis()
+                val repeatCount = pattern.repeatCount.coerceIn(1, 10)
+                val pulseMs = pattern.pulseMs.toLong().coerceIn(80L, 2000L)
+                val pauseMs = pattern.pauseMs.toLong().coerceIn(60L, 2000L)
 
-                while (isActive && (System.currentTimeMillis() - startTime) < totalMs) {
-                    val elapsed = System.currentTimeMillis() - startTime
-                    val progress = (elapsed.toFloat() / totalMs).coerceIn(0f, 1f)
-
-                    val currentIntensity = when (pattern.type) {
-                        PatternType.CRESCENDO -> {
-                            pattern.startIntensityPercent + ((pattern.endIntensityPercent - pattern.startIntensityPercent) * progress).toInt()
-                        }
-                        PatternType.DECRESCENDO -> {
-                            pattern.startIntensityPercent - ((pattern.startIntensityPercent - pattern.endIntensityPercent) * progress).toInt()
-                        }
-                        PatternType.HEARTBEAT -> {
-                            pattern.startIntensityPercent
-                        }
-                        PatternType.STEADY, PatternType.PULSE_WAVE -> {
-                            pattern.startIntensityPercent
-                        }
-                    }.coerceIn(10, 100)
-
-                    val dutyCycle = (currentIntensity / 100f).coerceIn(0.2f, 1.0f)
-                    val onTimeMs = (pattern.pulseMs * dutyCycle).toLong().coerceAtLeast(80L)
-                    val offTimeMs = (pattern.pauseMs).toLong().coerceAtLeast(80L)
-
-                    writeAlertLevel(3, onTimeMs.toInt(), offTimeMs.toInt(), 1)
-                    delay(onTimeMs)
-
-                    writeAlertLevel(0)
-                    if (offTimeMs > 0L) {
-                        delay(offTimeMs)
-                    }
-
-                    if (pattern.type == PatternType.HEARTBEAT) {
-                        delay(100L)
-                        val secondPulseMs = (onTimeMs * 0.7f).toLong().coerceAtLeast(80L)
-                        writeAlertLevel(3, secondPulseMs.toInt(), 80, 1)
-                        delay(secondPulseMs)
-                        writeAlertLevel(0)
+                for (r in 0 until repeatCount) {
+                    if (!isActive) break
+                    startMotorVibration(pulseMs.toInt())
+                    delay(pulseMs)
+                    stopMotorVibration()
+                    if (r < repeatCount - 1) {
+                        delay(pauseMs)
                     }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in custom vibration job", e)
             } finally {
-                writeAlertLevel(0)
+                stopMotorVibration()
                 isVibrating = false
                 onComplete?.invoke()
             }
@@ -922,14 +1083,14 @@ class MiBandBleManager(
                     val isVibrateStep = (i % 2 == 0)
 
                     if (isVibrateStep) {
-                        writeAlertLevel(3, duration.toInt(), 100, 1)
+                        startMotorVibration(duration.toInt())
                     } else {
-                        writeAlertLevel(0)
+                        stopMotorVibration()
                     }
                     delay(duration)
                 }
             } finally {
-                writeAlertLevel(0)
+                stopMotorVibration()
                 isVibrating = false
             }
         }
@@ -938,70 +1099,15 @@ class MiBandBleManager(
     fun stopVibration() {
         vibrationJob?.cancel()
         vibrationJob = null
-        writeAlertLevel(0)
+        stopMotorVibration()
         isVibrating = false
     }
 
     private fun writeAlertLevel(level: Int, onTimeMs: Int = 250, offTimeMs: Int = 200, repeat: Int = 1) {
-        val startVibration = level > 0
-
-        // 1. Direct hardware trigger: Immediate Alert Service (0x1802 / 0x2A06)
-        bluetoothGatt?.let { gatt ->
-            var service = gatt.getService(BleConstants.UUID_SERVICE_IMMEDIATE_ALERT)
-            var char = service?.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
-            if (char == null) {
-                for (s in gatt.services) {
-                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_ALERT_LEVEL)
-                    if (c != null) {
-                        char = c
-                        service = s
-                        break
-                    }
-                }
-            }
-
-            if (char != null) {
-                if (startVibration) {
-                    // Alert level 3: ALERT_LEVEL_VIBRATE_ONLY
-                    writeDirectImmediateAlert(gatt, char, byteArrayOf(BleConstants.ALERT_LEVEL_VIBRATE_ONLY))
-
-                    // Huami 6-byte hardware vibration packet: [-1, on_lo, on_hi, off_lo, off_hi, repeat]
-                    val patternPacket = byteArrayOf(
-                        0xFF.toByte(),
-                        (onTimeMs and 0xFF).toByte(),
-                        ((onTimeMs shr 8) and 0xFF).toByte(),
-                        (offTimeMs and 0xFF).toByte(),
-                        ((offTimeMs shr 8) and 0xFF).toByte(),
-                        repeat.coerceIn(1, 10).toByte()
-                    )
-                    writeDirectImmediateAlert(gatt, char, patternPacket)
-                } else {
-                    writeDirectImmediateAlert(gatt, char, byteArrayOf(BleConstants.ALERT_LEVEL_NONE))
-                }
-            }
-        }
-
-        // 2. Huami 2021 Chunked Protocol: Encrypted Find Device Endpoint 0x001A
-        // FIND_BAND_START = 0x03, FIND_BAND_STOP_FROM_PHONE = 0x06
-        if (use2021Protocol) {
-            val cmdByte = if (startVibration) 0x03.toByte() else 0x06.toByte()
-            try {
-                val findChunks = chunkedEncoder.encode(
-                    BleConstants.CHUNKED2021_ENDPOINT_FIND_DEVICE,
-                    byteArrayOf(cmdByte),
-                    extendedFlags = true,
-                    encrypt = true
-                )
-
-                scope.launch(Dispatchers.IO) {
-                    for (chunk in findChunks) {
-                        delay(35L)
-                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
-                    }
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "Failed sending 2021 find device chunk", e)
-            }
+        if (level > 0) {
+            startMotorVibration(onTimeMs)
+        } else {
+            stopMotorVibration()
         }
     }
 
