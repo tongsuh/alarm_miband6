@@ -34,9 +34,9 @@ class BreathingAudioAnalyzer(
 ) {
     companion object {
         private const val TAG = "BreathingAudioAnalyzer"
-        private const val SAMPLE_RATE = 8000 // 8kHz for low power consumption
         private const val CHANNEL_CONFIG = AudioFormat.CHANNEL_IN_MONO
         private const val AUDIO_FORMAT = AudioFormat.ENCODING_PCM_16BIT
+        private val SAMPLE_RATES = intArrayOf(44100, 16000, 8000)
     }
 
     private var audioRecord: AudioRecord? = null
@@ -53,24 +53,37 @@ class BreathingAudioAnalyzer(
     fun startAnalysis() {
         if (analysisJob != null && analysisJob?.isActive == true) return
 
-        val minBufSize = AudioRecord.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONFIG, AUDIO_FORMAT)
+        var selectedSampleRate = 44100
+        var minBufSize = -1
+        for (rate in SAMPLE_RATES) {
+            val size = AudioRecord.getMinBufferSize(rate, CHANNEL_CONFIG, AUDIO_FORMAT)
+            if (size > 0) {
+                selectedSampleRate = rate
+                minBufSize = size
+                break
+            }
+        }
+
         if (minBufSize <= 0) {
-            Log.e(TAG, "AudioRecord buffer size invalid: $minBufSize")
+            Log.e(TAG, "AudioRecord buffer size invalid for all sample rates")
             _state.value = _state.value.copy(isAudioReliable = false, isAnalyzing = false)
             return
         }
 
         try {
+            val bufSize = max(minBufSize, 4096)
             audioRecord = AudioRecord(
                 MediaRecorder.AudioSource.MIC,
-                SAMPLE_RATE,
+                selectedSampleRate,
                 CHANNEL_CONFIG,
                 AUDIO_FORMAT,
-                max(minBufSize, 4096)
+                bufSize
             )
 
             if (audioRecord?.state != AudioRecord.STATE_INITIALIZED) {
-                Log.e(TAG, "AudioRecord failed to initialize")
+                Log.e(TAG, "AudioRecord failed to initialize with sample rate $selectedSampleRate")
+                audioRecord?.release()
+                audioRecord = null
                 _state.value = _state.value.copy(isAudioReliable = false, isAnalyzing = false)
                 return
             }

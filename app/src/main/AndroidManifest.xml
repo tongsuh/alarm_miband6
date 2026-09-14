@@ -52,7 +52,6 @@
             android:exported="false"
             android:showWhenLocked="true"
             android:turnScreenOn="true"
-            android:keepScreenOn="true"
             android:theme="@style/Theme.FlashAlarm.Fullscreen" />
 
         <service

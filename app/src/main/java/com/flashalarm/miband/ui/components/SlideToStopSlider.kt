@@ -65,10 +65,10 @@ fun SlideToStopSlider(
         val totalWidthPx = with(density) { maxWidth.toPx() }
         val thumbSizeDp = (sliderHeightDp - 8).dp
         val thumbSizePx = with(density) { thumbSizeDp.toPx() }
-        val maxOffsetPx = totalWidthPx - thumbSizePx - with(density) { 8.dp.toPx() }
+        val maxOffsetPx = kotlin.math.max(0f, totalWidthPx - thumbSizePx - with(density) { 8.dp.toPx() })
 
         // Progress track fill behind thumb
-        val currentFraction = if (maxOffsetPx > 0) (thumbOffsetPx.value / maxOffsetPx).coerceIn(0f, 1f) else 0f
+        val currentFraction = if (maxOffsetPx > 0f) (thumbOffsetPx.value / maxOffsetPx).coerceIn(0f, 1f) else 0f
         val trackFillWidthDp = with(density) { (thumbOffsetPx.value + thumbSizePx).toDp() }
 
         Box(
@@ -113,7 +113,11 @@ fun SlideToStopSlider(
                         onDragEnd = {
                             if (currentFraction >= 0.75f) {
                                 // Confirmed stop with haptic
-                                view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                                    view.performHapticFeedback(HapticFeedbackConstants.CONFIRM)
+                                } else {
+                                    view.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
+                                }
                                 coroutineScope.launch {
                                     thumbOffsetPx.animateTo(maxOffsetPx, spring())
                                     onStopConfirmed()

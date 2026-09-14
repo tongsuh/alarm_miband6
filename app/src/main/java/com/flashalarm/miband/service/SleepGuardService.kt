@@ -86,13 +86,7 @@ class SleepGuardService : Service() {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            Log.w(TAG, "Initial startForeground with type failed, falling back to untyped", e)
-            try {
-                @Suppress("DEPRECATION")
-                startForeground(NOTIFICATION_ID, notification)
-            } catch (e2: Exception) {
-                Log.e(TAG, "Fatal startForeground error in onCreate", e2)
-            }
+            Log.e(TAG, "Failed starting connectedDevice foreground service in onCreate", e)
         }
     }
 
@@ -322,12 +316,12 @@ class SleepGuardService : Service() {
         )
 
         return NotificationCompat.Builder(this, CHANNEL_ID)
-            .setSmallIcon(R.drawable.ic_moon)
+            .setSmallIcon(R.drawable.ic_stat_moon)
             .setContentTitle("FlashAlarm 睡眠守护中")
             .setContentText(statusText)
             .setOngoing(true)
             .setContentIntent(pendingOpen)
-            .addAction(R.drawable.ic_moon, "结束守护", pendingStop)
+            .addAction(R.drawable.ic_stat_moon, "结束守护", pendingStop)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .build()
     }

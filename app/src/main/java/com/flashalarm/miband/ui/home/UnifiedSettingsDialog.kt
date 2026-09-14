@@ -239,7 +239,7 @@ fun UnifiedSettingsDialog(
                                     }
 
                                     Text(
-                                        text = if (metrics.isHrStreaming) "流式监听中" else "待机",
+                                        text = if (metrics.isHrStreaming) "● 连续测定中 (1Hz)" else "常规间隔监测 (待机)",
                                         fontSize = 11.sp,
                                         color = if (metrics.isHrStreaming) HeartRateRed else DarkTextTertiary
                                     )
@@ -260,7 +260,7 @@ fun UnifiedSettingsDialog(
                                         color = HeartRateRed
                                     )
                                     Text(
-                                        text = "BPM / 实时脉搏",
+                                        text = if (metrics.isHrStreaming) "BPM / 实时脉搏" else "BPM / 最近测量 (非实时)",
                                         fontSize = 12.sp,
                                         color = DarkTextSecondary
                                     )
@@ -329,6 +329,7 @@ fun UnifiedSettingsDialog(
                                     }
 
                                     val movementDesc = when {
+                                        !metrics.isMotionStreaming -> "未激活体动流"
                                         metrics.actigraphyG < 0.035f -> "肌肉松弛(REM/深睡)"
                                         metrics.actigraphyG < 0.14f -> "轻度微动"
                                         else -> "大幅体动/翻身"
@@ -336,7 +337,7 @@ fun UnifiedSettingsDialog(
                                     Text(
                                         text = movementDesc,
                                         fontSize = 11.sp,
-                                        color = if (metrics.actigraphyG > 0.14f) HeartRateRed else MiBandCyan
+                                        color = if (!metrics.isMotionStreaming) DarkTextTertiary else if (metrics.actigraphyG > 0.14f) HeartRateRed else MiBandCyan
                                     )
                                 }
 
@@ -355,9 +356,9 @@ fun UnifiedSettingsDialog(
                                         color = MiBandCyan
                                     )
                                     Text(
-                                        text = if (metrics.isMotionStreaming) "动量流活跃" else "动量流待机",
+                                        text = if (metrics.isMotionStreaming) "动量流活跃 (25Hz)" else "动量流待机",
                                         fontSize = 11.sp,
-                                        color = DarkTextTertiary
+                                        color = if (metrics.isMotionStreaming) MiBandCyan else DarkTextTertiary
                                     )
                                 }
 
@@ -379,7 +380,7 @@ fun UnifiedSettingsDialog(
                                     )
                                 ) {
                                     Text(
-                                        text = if (metrics.isMotionStreaming) "重新激活体动流 (监听中)" else "启动三轴体动监测",
+                                        text = if (metrics.isMotionStreaming) "重新校准 / 激活体动流" else "启动三轴体动监测",
                                         fontSize = 12.sp,
                                         color = if (metrics.isMotionStreaming) Color.White else Color.Black,
                                         fontWeight = FontWeight.SemiBold

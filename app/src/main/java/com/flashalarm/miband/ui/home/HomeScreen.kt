@@ -265,7 +265,7 @@ fun HomeScreen(
                             } else {
                                 context.startService(serviceIntent)
                             }
-                            context.startActivity(Intent(context, SleepModeActivity::class.java))
+                            Toast.makeText(context, "手环睡眠守护已在后台开启", Toast.LENGTH_SHORT).show()
                         } catch (e: Exception) {
                             android.util.Log.e("HomeScreen", "Failed starting SleepGuardService", e)
                             Toast.makeText(context, "无法启动守护服务: ${e.localizedMessage}", Toast.LENGTH_LONG).show()

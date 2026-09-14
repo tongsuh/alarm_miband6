@@ -68,7 +68,16 @@ object BleConstants {
     val HR_STOP_CONTINUOUS = byteArrayOf(0x15, 0x01, 0x00)
     val HR_PING_KEEPALIVE = byteArrayOf(0x16)
 
+    // Immediate Alert Levels
+    const val ALERT_LEVEL_NONE: Byte = 0x00
+    const val ALERT_LEVEL_MESSAGE: Byte = 0x01
+    const val ALERT_LEVEL_PHONE_CALL: Byte = 0x02
+    const val ALERT_LEVEL_VIBRATE_ONLY: Byte = 0x03
+
     // Sensor Commands (Actigraphy streaming)
+    val CMD_RAW_SENSOR_START_1 = byteArrayOf(0x01, 0x03, 0x19) // Accel 25Hz
+    val CMD_RAW_SENSOR_START_3 = byteArrayOf(0x02)             // Trigger stream
+    val CMD_RAW_SENSOR_STOP = byteArrayOf(0x03)                // Stop stream
     val SENSOR_START_CMD = byteArrayOf(0x01, 0x01)
     val SENSOR_STOP_CMD = byteArrayOf(0x00)
 }
