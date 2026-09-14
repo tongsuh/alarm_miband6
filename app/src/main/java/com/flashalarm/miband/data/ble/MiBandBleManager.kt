@@ -104,12 +104,15 @@ class MiBandBleManager(
     private var isVibrating = false
     private var isHrToggleBusy = false
 
-    // Actigraphy differential state
-    private var prevX = 0f
-    private var prevY = 0f
-    private var prevZ = 0f
-    private var hasPrevSample = false
+    // Actigraphy postural vector state
+    private var baselineGx = 0f
+    private var baselineGy = 0f
+    private var baselineGz = 0f
+    private var baselineMag = 0f
+    private var isBaselineInitialized = false
     private var smoothedActigraphy = 0f
+    private var lastRawSensorPacketTimeMs = 0L
+    private var sensorKeepAliveJob: Job? = null
 
     fun setTargetDevice(name: String, mac: String, authKeyHex: String, use2021: Boolean = true) {
         this.use2021Protocol = use2021
@@ -287,6 +290,8 @@ class MiBandBleManager(
         authTimeoutJob = null
         hrKeepAliveJob?.cancel()
         hrKeepAliveJob = null
+        sensorKeepAliveJob?.cancel()
+        sensorKeepAliveJob = null
         actigraphyTickerJob?.cancel()
         actigraphyTickerJob = null
         stopVibration()
@@ -431,10 +436,12 @@ class MiBandBleManager(
                     }
                 }
             } else if (charUuid == BleConstants.UUID_CHAR_HEART_RATE_MEASUREMENT) {
-                scope.launch(Dispatchers.IO) {
-                    delay(150L)
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
-                    startHrKeepAlive()
+                if (_deviceMetrics.value.isHrStreaming) {
+                    scope.launch(Dispatchers.IO) {
+                        delay(150L)
+                        writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
+                        startHrKeepAlive()
+                    }
                 }
             }
         }
@@ -635,12 +642,14 @@ class MiBandBleManager(
             return
         }
         if (resetBaseline) {
-            hasPrevSample = false
+            isBaselineInitialized = false
+            baselineMag = 0.0f
             smoothedActigraphy = 0.0f
             _deviceMetrics.value = _deviceMetrics.value.copy(actigraphyG = 0.0f)
         }
         _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
         startActigraphyTicker()
+        startSensorKeepAlive()
         scope.launch(Dispatchers.IO) {
             var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
             var sensorDataChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
@@ -676,15 +685,13 @@ class MiBandBleManager(
                 delay(250L)
             }
 
-            // 4. Send Huami raw sensor sequence with WRITE_TYPE_NO_RESPONSE
-            if (sensorCtrlChar != null) {
-                Log.i(TAG, "Sending CMD_RAW_SENSOR_START_1 [0x01, 0x03, 0x19] to 0x0001...")
-                writeRawSensorCommand(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_1)
-                delay(150L)
-                Log.i(TAG, "Sending CMD_RAW_SENSOR_START_3 [0x02] trigger to 0x0001...")
-                writeRawSensorCommand(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
-                delay(150L)
-            }
+            // 4. Send Huami raw sensor sequence using writeCharacteristic (safe writeType negotiation)
+            Log.i(TAG, "Sending CMD_RAW_SENSOR_START_1 [0x01, 0x03, 0x19] to 0x0001...")
+            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_1)
+            delay(150L)
+            Log.i(TAG, "Sending CMD_RAW_SENSOR_START_3 [0x02] trigger to 0x0001...")
+            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_3)
+            delay(150L)
 
             // 5. If 2021 protocol, also enable realtime steps on endpoint 0x0016
             if (use2021Protocol) {
@@ -702,14 +709,25 @@ class MiBandBleManager(
         }
     }
 
+    private fun startSensorKeepAlive() {
+        sensorKeepAliveJob?.cancel()
+        sensorKeepAliveJob = scope.launch(Dispatchers.IO) {
+            while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isMotionStreaming) {
+                delay(12000L)
+                // Ping sensor stream trigger to maintain raw FIFO pushing
+                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_3)
+            }
+        }
+    }
+
     private fun startActigraphyTicker() {
         if (actigraphyTickerJob?.isActive == true) return
         actigraphyTickerJob = scope.launch(Dispatchers.Default) {
             while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isMotionStreaming) {
                 delay(1000L) // 1Hz live smooth tick (matching SAA / Notify)
-                if (smoothedActigraphy > 0.001f) {
-                    smoothedActigraphy = (smoothedActigraphy * 0.72f).coerceAtLeast(0.0f)
-                    if (smoothedActigraphy < 0.002f) smoothedActigraphy = 0.0f
+                if (smoothedActigraphy > 0.005f) {
+                    smoothedActigraphy = (smoothedActigraphy * 0.75f).coerceAtLeast(0.0f)
+                    if (smoothedActigraphy < 0.005f) smoothedActigraphy = 0.0f
                     _deviceMetrics.value = _deviceMetrics.value.copy(actigraphyG = smoothedActigraphy)
                     _actigraphyFlow.tryEmit(smoothedActigraphy)
                 }
@@ -731,47 +749,37 @@ class MiBandBleManager(
             val stepDelta = if (lastStepsCount >= 0) (currentSteps - lastStepsCount).coerceAtLeast(0) else 0
             lastStepsCount = currentSteps
 
-            val movementG = when {
-                stepDelta >= 5 -> 0.38f
-                stepDelta > 0 -> 0.19f
-                else -> 0.025f
-            }
+            // Step delta acts as a fallback or enhancement if raw sensor stream is absent
+            val now = System.currentTimeMillis()
+            val isRawSensorActive = (now - lastRawSensorPacketTimeMs) < 4000L
 
-            smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) movementG else (smoothedActigraphy * 0.5f + movementG * 0.5f)
-            _deviceMetrics.value = _deviceMetrics.value.copy(
-                actigraphyG = smoothedActigraphy,
-                isMotionStreaming = true
-            )
-            _actigraphyFlow.tryEmit(smoothedActigraphy)
-            startActigraphyTicker()
+            if (!isRawSensorActive && stepDelta > 0) {
+                val movementG = if (stepDelta >= 5) 0.38f else 0.19f
+                smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) movementG else (smoothedActigraphy * 0.5f + movementG * 0.5f)
+                _deviceMetrics.value = _deviceMetrics.value.copy(
+                    actigraphyG = smoothedActigraphy,
+                    isMotionStreaming = true
+                )
+                _actigraphyFlow.tryEmit(smoothedActigraphy)
+                startActigraphyTicker()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing realtime steps data", e)
         }
     }
 
-    private fun writeRawSensorCommand(gatt: BluetoothGatt, char: BluetoothGattCharacteristic, data: ByteArray): Boolean {
-        char.writeType = BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val status = gatt.writeCharacteristic(char, data, BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE)
-            status == BluetoothStatusCodes.SUCCESS
-        } else {
-            @Suppress("DEPRECATION")
-            char.value = data
-            @Suppress("DEPRECATION")
-            gatt.writeCharacteristic(char)
-        }
-    }
-
     private fun parseActigraphyData(data: ByteArray) {
         if (data.size < 6) return
+        lastRawSensorPacketTimeMs = System.currentTimeMillis()
         try {
-            // Standard Mi Band raw sensor packet (20 bytes): 2-byte sequence header + 3x 6-byte samples
+            // Standard Mi Band raw sensor packet:
+            // 2-byte sequence header + N x 6-byte samples (X, Y, Z as 16-bit signed little-endian)
             var offset = if (data.size % 6 == 2) 2 else 0
-            var sumMovement = 0.0f
+            var sumDisplacement = 0.0f
             var sampleCount = 0
 
             while (offset + 6 <= data.size) {
-                // Correct 16-bit signed integer extraction
+                // 16-bit signed integer extraction
                 val rawX = (data[offset].toInt() and 0xFF) or ((data[offset + 1].toInt() and 0xFF) shl 8)
                 val rawY = (data[offset + 2].toInt() and 0xFF) or ((data[offset + 3].toInt() and 0xFF) shl 8)
                 val rawZ = (data[offset + 4].toInt() and 0xFF) or ((data[offset + 5].toInt() and 0xFF) shl 8)
@@ -780,33 +788,63 @@ class MiBandBleManager(
                 val y = rawY.toShort().toFloat()
                 val z = rawZ.toShort().toFloat()
 
-                if (hasPrevSample) {
-                    val dx = (x - prevX) / 4096.0f
-                    val dy = (y - prevY) / 4096.0f
-                    val dz = (z - prevZ) / 4096.0f
-                    val jerk = sqrt(dx * dx + dy * dy + dz * dz)
-                    sumMovement += jerk
-                    sampleCount++
-                } else {
-                    hasPrevSample = true
+                val currentMag = sqrt(x * x + y * y + z * z)
+
+                // Initialize static gravity baseline on first valid packet
+                if (!isBaselineInitialized || baselineMag <= 10.0f) {
+                    if (currentMag > 10.0f) {
+                        baselineGx = x
+                        baselineGy = y
+                        baselineGz = z
+                        baselineMag = currentMag
+                        isBaselineInitialized = true
+                        Log.i(TAG, "Actigraphy baseline initialized: G=($x, $y, $z), Mag=$currentMag")
+                    }
                 }
 
-                prevX = x
-                prevY = y
-                prevZ = z
+                if (isBaselineInitialized && baselineMag > 10.0f) {
+                    // Normalized current vector (1.0 = 1g)
+                    val ux = x / baselineMag
+                    val uy = y / baselineMag
+                    val uz = z / baselineMag
+
+                    // Normalized baseline vector
+                    val bx = baselineGx / baselineMag
+                    val by = baselineGy / baselineMag
+                    val bz = baselineGz / baselineMag
+
+                    // Postural vector displacement in units of g
+                    val dx = ux - bx
+                    val dy = uy - by
+                    val dz = uz - bz
+                    val disp = sqrt(dx * dx + dy * dy + dz * dz)
+
+                    sumDisplacement += disp
+                    sampleCount++
+
+                    // Adaptive baseline tracking (slowly adapts to new static posture)
+                    val adaptAlpha = if (disp < 0.15f) 0.005f else 0.0005f
+                    baselineGx = baselineGx * (1.0f - adaptAlpha) + x * adaptAlpha
+                    baselineGy = baselineGy * (1.0f - adaptAlpha) + y * adaptAlpha
+                    baselineGz = baselineGz * (1.0f - adaptAlpha) + z * adaptAlpha
+                    baselineMag = sqrt(baselineGx * baselineGx + baselineGy * baselineGy + baselineGz * baselineGz)
+                }
+
                 offset += 6
             }
 
-            val avgMagnitude = if (sampleCount > 0) sumMovement / sampleCount else 0.0f
-            // Exponential smoothing to eliminate digital jitter
-            smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) avgMagnitude else (smoothedActigraphy * 0.65f + avgMagnitude * 0.35f)
+            if (sampleCount > 0) {
+                val avgDisp = sumDisplacement / sampleCount
+                // Smooth instantaneous reading
+                smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) avgDisp else (smoothedActigraphy * 0.60f + avgDisp * 0.40f)
 
-            _deviceMetrics.value = _deviceMetrics.value.copy(
-                actigraphyG = smoothedActigraphy,
-                isMotionStreaming = true
-            )
-            _actigraphyFlow.tryEmit(smoothedActigraphy)
-            startActigraphyTicker()
+                _deviceMetrics.value = _deviceMetrics.value.copy(
+                    actigraphyG = smoothedActigraphy,
+                    isMotionStreaming = true
+                )
+                _actigraphyFlow.tryEmit(smoothedActigraphy)
+                startActigraphyTicker()
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing actigraphy sensor bytes", e)
         }
@@ -823,6 +861,9 @@ class MiBandBleManager(
     }
 
     fun setHeartRateStreamingMode(isContinuous: Boolean) {
+        if (_deviceMetrics.value.isHrStreaming == isContinuous) {
+            return
+        }
         if (isHrToggleBusy) {
             Log.w(TAG, "setHeartRateStreamingMode: toggle busy, skipping rapid invocation")
             return

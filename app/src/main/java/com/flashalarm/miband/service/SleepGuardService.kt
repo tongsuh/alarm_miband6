@@ -64,6 +64,7 @@ class SleepGuardService : Service() {
     // Cache latest values for epoch evaluation
     private var lastHeartRate = 60
     private var lastActigraphy = 0.0f
+    private val epochActigraphySamples = mutableListOf<Float>()
     private var currentActiveSessionId: Long = 0L
 
     inner class LocalBinder : Binder() {
@@ -177,10 +178,16 @@ class SleepGuardService : Service() {
             launch {
                 app.bleManager.actigraphyFlow.collect { act ->
                     lastActigraphy = act
+                    synchronized(epochActigraphySamples) {
+                        epochActigraphySamples.add(act)
+                    }
                 }
             }
 
-            // 6. Start 30-second epoch loop
+            // 6. Ensure high-frequency HR streaming for sleep onset detection
+            app.bleManager.setHeartRateStreamingMode(true)
+
+            // 7. Start 30-second epoch loop
             startEpochLoop(app, sessionId)
         }
     }
@@ -191,30 +198,48 @@ class SleepGuardService : Service() {
             while (isActive && _isServiceRunning.value) {
                 delay(30000L) // 30-second epoch tick
 
+                val (epochAvgAct, epochMaxAct) = synchronized(epochActigraphySamples) {
+                    val avg = if (epochActigraphySamples.isNotEmpty()) epochActigraphySamples.average().toFloat() else lastActigraphy
+                    val max = if (epochActigraphySamples.isNotEmpty()) epochActigraphySamples.maxOrNull() ?: lastActigraphy else lastActigraphy
+                    epochActigraphySamples.clear()
+                    Pair(avg, max)
+                }
+
                 val audioState = app.audioAnalyzer.state.value
                 val stagingResult = app.remEngine.evaluateEpoch(
                     heartRate = lastHeartRate,
-                    actigraphyMagnitude = lastActigraphy,
+                    actigraphyMagnitude = epochAvgAct,
                     audioIrregularity = if (audioState.isAudioReliable) audioState.irregularityScore else -1.0f,
                     isAudioReliable = audioState.isAudioReliable,
-                    currentTimeMs = System.currentTimeMillis()
+                    currentTimeMs = System.currentTimeMillis(),
+                    peakActigraphy = epochMaxAct
                 )
 
                 _liveStaging.value = stagingResult
 
-                // Differential Heart Rate Sampling adjustment:
-                // When in DREAM_WINDOW_ACTIVE, switch band to continuous 1Hz sampling
-                if (stagingResult.sessionPhase == SleepSessionPhase.DREAM_WINDOW_ACTIVE) {
-                    app.bleManager.setHeartRateStreamingMode(true)
+                // Multi-Tier Adaptive Heart Rate Sampling:
+                // 1. DETECTING_ONSET: High-frequency continuous streaming (1Hz) to accurately track sleep onset dip & HRV stabilization
+                // 2. PROTECTION_PERIOD: Low-power standby (turn off continuous mode to save battery & turn off green LED during deep sleep)
+                // 3. DREAM_WINDOW_ACTIVE: High-frequency continuous streaming (1Hz) to capture REM heart rate surge & CV dispersion
+                when (stagingResult.sessionPhase) {
+                    SleepSessionPhase.DETECTING_ONSET -> {
+                        app.bleManager.setHeartRateStreamingMode(true)
+                    }
+                    SleepSessionPhase.PROTECTION_PERIOD -> {
+                        app.bleManager.setHeartRateStreamingMode(false)
+                    }
+                    SleepSessionPhase.DREAM_WINDOW_ACTIVE -> {
+                        app.bleManager.setHeartRateStreamingMode(true)
+                    }
                 }
 
-                // Record epoch in DB
+                // Record epoch in DB (record peak actigraphy so movement spikes are faithfully captured)
                 app.sleepRepository.recordEpoch(
                     sessionId = sessionId,
                     timestamp = stagingResult.timestamp,
                     stage = stagingResult.stage,
                     heartRate = lastHeartRate,
-                    actigraphy = lastActigraphy,
+                    actigraphy = epochMaxAct,
                     audioIrregularity = stagingResult.audioIrregularity,
                     confidence = stagingResult.confidence
                 )
@@ -275,6 +300,7 @@ class SleepGuardService : Service() {
         app.audioAnalyzer.stopAnalysis()
         app.audioPlayer.stopAudio()
         app.bleManager.stopVibration()
+        app.bleManager.setHeartRateStreamingMode(false)
 
         serviceScope.launch {
             if (currentActiveSessionId > 0L) {
@@ -344,11 +370,13 @@ class SleepGuardService : Service() {
     override fun onDestroy() {
         super.onDestroy()
         try {
+            val app = applicationContext as? FlashAlarmApp
+            app?.bleManager?.setHeartRateStreamingMode(false)
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Error releasing wakelock", e)
+            Log.e(TAG, "Error releasing wakelock or stopping streaming", e)
         }
         serviceScope.cancel()
         _isServiceRunning.value = false

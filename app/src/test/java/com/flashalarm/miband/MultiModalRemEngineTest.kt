@@ -17,7 +17,7 @@ class MultiModalRemEngineTest {
     fun setUp() {
         val config = DreamCueConfig(
             cooldownMinutes = 20,
-            minSleepOnsetMinutes = 70,
+            sleepOnsetProtectionHours = 70f / 60f,
             confidenceThreshold = 0.80f
         )
         engine = MultiModalRemEngine(config)
@@ -26,6 +26,7 @@ class MultiModalRemEngineTest {
 
     @Test
     fun `test movement veto rule - roll over or arm lift immediately vetoes REM`() {
+        engine.markSleepOnset(0L)
         // Feed still baseline to establish deep sleep
         for (i in 0 until 10) {
             engine.evaluateEpoch(heartRate = 55, actigraphyMagnitude = 0.01f, currentTimeMs = 1000L * i)
@@ -46,6 +47,7 @@ class MultiModalRemEngineTest {
 
     @Test
     fun `test sleep onset window protection - suppresses cue before 70 minutes`() {
+        engine.markSleepOnset(0L)
         // Fast-forward 30 minutes after onset (under 70 minutes)
         val elapsedMs = 30 * 60 * 1000L
 
@@ -74,6 +76,7 @@ class MultiModalRemEngineTest {
 
     @Test
     fun `test dual verification triggers lucid cue after 70 minutes with high confidence`() {
+        engine.markSleepOnset(0L)
         // 1. Establish baseline at 56 bpm during early deep sleep
         for (i in 0 until 15) {
             engine.evaluateEpoch(
@@ -113,6 +116,7 @@ class MultiModalRemEngineTest {
 
     @Test
     fun `test graceful degradation when audio is disabled or noisy`() {
+        engine.markSleepOnset(0L)
         // Advance past 75 min
         val timeMs = 90 * 60 * 1000L
 
@@ -142,6 +146,7 @@ class MultiModalRemEngineTest {
 
     @Test
     fun `test cue cooldown prevents repeated waking stimuli`() {
+        engine.markSleepOnset(0L)
         val timeMs = 80 * 60 * 1000L
 
         // Trigger first cue
@@ -175,5 +180,40 @@ class MultiModalRemEngineTest {
         )
 
         assertFalse("Second cue must be blocked by cooldown", secondCue.isDreamCueTriggered)
+    }
+
+    @Test
+    fun `test sleep onset detection requires stillness and physiological HR dip`() {
+        // Reset session
+        engine.startSession(startTimeMs = 0L)
+
+        // 1. Initial 8 epochs: Bedtime quietness, awake HR around 70 bpm
+        for (i in 0 until 8) {
+            val res = engine.evaluateEpoch(
+                heartRate = 70,
+                actigraphyMagnitude = 0.02f,
+                peakActigraphy = 0.03f,
+                currentTimeMs = 30000L * i
+            )
+            assertFalse("Should not detect onset immediately", res.isSleepOnsetDetected)
+        }
+
+        // 2. Next 8 epochs: Stillness maintained and HR drops to 65 bpm (5 bpm dip)
+        var finalResult = engine.evaluateEpoch(
+            heartRate = 65,
+            actigraphyMagnitude = 0.015f,
+            peakActigraphy = 0.02f,
+            currentTimeMs = 30000L * 8
+        )
+        for (i in 9 until 17) {
+            finalResult = engine.evaluateEpoch(
+                heartRate = 65,
+                actigraphyMagnitude = 0.015f,
+                peakActigraphy = 0.02f,
+                currentTimeMs = 30000L * i
+            )
+        }
+
+        assertTrue("Sleep onset should be confirmed after 16 sustained still epochs with HR dip", finalResult.isSleepOnsetDetected)
     }
 }

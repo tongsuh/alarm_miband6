@@ -60,9 +60,10 @@ class MultiModalRemEngine(
         actigraphyMagnitude: Float,
         audioIrregularity: Float = -1.0f,
         isAudioReliable: Boolean = false,
-        currentTimeMs: Long = System.currentTimeMillis()
+        currentTimeMs: Long = System.currentTimeMillis(),
+        peakActigraphy: Float = actigraphyMagnitude
     ): RemStagingResult {
-        // 1. Maintain sliding window (last 60 samples ~ 1-5 minutes)
+        // 1. Maintain sliding window (last 60 samples ~ 30 minutes)
         if (heartRate in 36..219) {
             recentHeartRates.addLast(heartRate)
             if (recentHeartRates.size > 60) recentHeartRates.removeFirst()
@@ -77,9 +78,9 @@ class MultiModalRemEngine(
         }
 
         // 2. Wrist Actigraphy: Muscle Atonia & VETO Trigger
-        val maxRecentMovement = recentActigraphy.maxOrNull() ?: actigraphyMagnitude
+        val maxRecentMovement = kotlin.math.max(recentActigraphy.maxOrNull() ?: actigraphyMagnitude, peakActigraphy)
         val avgMovement = if (recentActigraphy.isNotEmpty()) recentActigraphy.average().toFloat() else actigraphyMagnitude
-        val isVetoedByMovement = maxRecentMovement > 0.14f || actigraphyMagnitude > 0.18f
+        val isVetoedByMovement = maxRecentMovement > 0.14f || peakActigraphy > 0.18f
 
         // Atonia score: 1.0 when completely still (actigraphy < 0.02g), drops to 0 when moving
         val atoniaScore = (1.0f - (avgMovement / 0.10f)).coerceIn(0.0f, 1.0f)
@@ -110,14 +111,23 @@ class MultiModalRemEngine(
 
         // 4. Sleep Onset Detection State Machine (Cole-Kripke stillness + resting HR dip)
         if (!isSleepOnsetDetected) {
-            if (avgMovement < 0.04f && atoniaScore >= 0.65f) {
+            val isStill = avgMovement < 0.045f && peakActigraphy < 0.12f && atoniaScore >= 0.60f
+            if (isStill) {
                 sustainedStillnessEpochs++
-                // ~10 minutes of quiet breathing (20 x 30s epochs or 16 epochs)
-                if (sustainedStillnessEpochs >= 16) {
+                // Physiological Sleep Onset Dip check:
+                // Bedtime resting HR typically dips 2.5+ bpm below initial bedtime level, with HRV stabilizing
+                val initialHr = if (recentHeartRates.size >= 8) recentHeartRates.take(8).average().toFloat() else currentMeanHr
+                val hasHrDipped = initialHr > 0 && currentMeanHr > 0 && (initialHr - currentMeanHr >= 2.5f)
+                val isHrvStable = hrvCv in 0.01f..0.045f
+
+                // Sleep onset confirmed if:
+                // 1) 16 sustained quiet epochs (8 mins) AND (HR dipped or HRV stabilized)
+                // 2) OR unbroken stillness for 24 epochs (12 mins) as physiological fallback
+                if ((sustainedStillnessEpochs >= 16 && (hasHrDipped || isHrvStable)) || sustainedStillnessEpochs >= 24) {
                     isSleepOnsetDetected = true
                     sleepOnsetDetectedTimeMs = currentTimeMs
                 }
-            } else if (avgMovement > 0.15f) {
+            } else if (peakActigraphy > 0.15f || avgMovement > 0.10f) {
                 // User rolled over or got up
                 sustainedStillnessEpochs = (sustainedStillnessEpochs - 3).coerceAtLeast(0)
             }
