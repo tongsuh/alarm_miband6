@@ -922,6 +922,7 @@ class MiBandBleManager(
                 if (totalRawSensorPackets % 50L == 1L) {
                     Log.d(TAG, "Raw sensor stream alive! Packet #$totalRawSensorPackets: X=$lastSampleX, Y=$lastSampleY, Z=$lastSampleZ, Disp=$avgDisp, ActigraphyG=$smoothedActigraphy")
                 }
+            }
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing actigraphy sensor bytes", e)
         }
