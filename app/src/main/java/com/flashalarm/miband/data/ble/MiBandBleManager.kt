@@ -1039,6 +1039,7 @@ class MiBandBleManager(
 
     fun triggerCustomVibration(
         pattern: CustomizableVibrationPattern,
+        useTotalDuration: Boolean = false,
         onComplete: (() -> Unit)? = null
     ) {
         // Cancel any active vibration job cleanly without launching competing async writes
@@ -1050,10 +1051,12 @@ class MiBandBleManager(
         // Handshake/firmware call state machine requires >= 500ms interval between call end and next call start
         // to complete teardown animation and reset GSM debounce timer, otherwise subsequent calls are silently dropped.
         val pauseMs = pattern.pauseMs.toLong().coerceAtLeast(500L)
+        val totalDurationMs = if (useTotalDuration) pattern.durationSeconds.toLong() * 1000L else 0L
 
         vibrationJob = scope.launch(Dispatchers.IO) {
             val wasVibrating = isVibrating
             isVibrating = true
+            val startTime = System.currentTimeMillis()
             try {
                 // If motor was previously vibrating, ensure it is cleanly stopped and settled first
                 if (wasVibrating) {
@@ -1061,26 +1064,39 @@ class MiBandBleManager(
                     delay(200L)
                 }
 
-                for (r in 0 until repeatCount) {
-                    if (!isActive) break
+                do {
+                    for (r in 0 until repeatCount) {
+                        if (!isActive) break
 
-                    val currentPulseMs = when (pattern.type) {
-                        PatternType.CRESCENDO -> (pulseMs * (0.6f + 0.4f * (r + 1) / repeatCount)).toLong()
-                        else -> pulseMs
+                        val currentPulseMs = when (pattern.type) {
+                            PatternType.CRESCENDO -> (pulseMs * (0.6f + 0.4f * (r + 1) / repeatCount)).toLong()
+                            else -> pulseMs
+                        }
+
+                        // 1. Send CALL_START sequentially (awaiting completion of all chunks)
+                        sendCallStart()
+                        // 2. Vibrate for exact pulse duration
+                        delay(currentPulseMs)
+                        // 3. Send CALL_STOP sequentially (awaiting completion of all chunks)
+                        sendCallStop()
+
+                        // 4. Inter-pulse pause: allow firmware call state machine to cleanly reset
+                        if (r < repeatCount - 1) {
+                            delay(pauseMs)
+                        }
                     }
 
-                    // 1. Send CALL_START sequentially (awaiting completion of all chunks)
-                    sendCallStart()
-                    // 2. Vibrate for exact pulse duration
-                    delay(currentPulseMs)
-                    // 3. Send CALL_STOP sequentially (awaiting completion of all chunks)
-                    sendCallStop()
-
-                    // 4. Inter-pulse pause: allow firmware call state machine to cleanly reset
-                    if (r < repeatCount - 1) {
-                        delay(pauseMs)
+                    // If total duration is enabled, check remaining time before next burst cycle
+                    if (useTotalDuration && isActive) {
+                        val elapsed = System.currentTimeMillis() - startTime
+                        if (elapsed + (repeatCount * (pulseMs + pauseMs)) <= totalDurationMs) {
+                            // Inter-burst pause (1.5s gentle rest before next pattern cycle)
+                            delay(1500L)
+                        } else {
+                            break
+                        }
                     }
-                }
+                } while (useTotalDuration && isActive && (System.currentTimeMillis() - startTime < totalDurationMs))
             } catch (e: CancellationException) {
                 // Cancelled early by stopVibration(), guarantee cleanup
                 withContext(NonCancellable) {

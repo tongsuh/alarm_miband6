@@ -227,7 +227,7 @@ class SleepGuardService : Service() {
 
                     // 1. Dispatch Wrist Motor Vibration (if enabled)
                     if (config.enableWristVibration) {
-                        app.bleManager.triggerCustomVibration(activePattern)
+                        app.bleManager.triggerCustomVibration(activePattern, useTotalDuration = true)
                     }
 
                     // 2. Dispatch Audio Whisper Cue (if enabled)

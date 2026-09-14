@@ -522,9 +522,24 @@ fun UnifiedSettingsDialog(
                                     colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
                                 )
 
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("触梦震动总时长", fontSize = 12.sp, color = DarkTextSecondary)
+                                    Text("${currentPattern.durationSeconds} 秒", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                                }
+                                Slider(
+                                    value = currentPattern.durationSeconds.toFloat(),
+                                    onValueChange = { updateCurrentPattern { p -> p.copy(durationSeconds = it.toInt()) } },
+                                    valueRange = 5f..60f,
+                                    steps = 11,
+                                    colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+                                )
+
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "说明：采用与 Gadgetbridge 对齐的实时警报通道，时序严格串行同步并保证手环固件复位安全间歇（≥500ms），设几次就精准物理震动几次。",
+                                    text = "说明：【单次脉冲时长】微调每次轻震的微观长短；【触梦震动总时长】控制触梦唤醒提醒持续的总秒数（可与音频耳语时长独立分别配置）。采用与 Gadgetbridge 对齐的实时警报通道，时序严格串行同步并保证手环固件复位安全间歇（≥500ms），设几次就精准物理震动几次。",
                                     fontSize = 10.sp,
                                     color = DarkTextTertiary,
                                     lineHeight = 14.sp
@@ -681,6 +696,14 @@ fun UnifiedSettingsDialog(
                                     valueRange = 5f..30f,
                                     steps = 5,
                                     colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+                                )
+
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "说明：若自定义音频时长短于设定时长，系统会自动无缝循环播放，直至达到设定总时长后平滑淡出。",
+                                    fontSize = 10.sp,
+                                    color = DarkTextTertiary,
+                                    lineHeight = 14.sp
                                 )
 
                                 Spacer(modifier = Modifier.height(8.dp))

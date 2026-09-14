@@ -62,9 +62,21 @@ import com.flashalarm.miband.ui.theme.PureBlack
 import kotlinx.coroutines.delay
 import java.text.SimpleDateFormat
 import java.util.Date
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import java.util.Locale
 
 class SleepModeActivity : ComponentActivity() {
+
+    fun setScreenBrightness(brightness: Float) {
+        try {
+            val lp = window.attributes
+            lp.screenBrightness = brightness.coerceIn(0.01f, 1.0f)
+            window.attributes = lp
+        } catch (e: Exception) {
+            android.util.Log.w("SleepModeActivity", "Failed setting screen brightness", e)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -75,6 +87,8 @@ class SleepModeActivity : ComponentActivity() {
                 setShowWhenLocked(true)
                 setTurnScreenOn(true)
             }
+            // Bedside Nightstand: Set window brightness to absolute minimum (0.01f)
+            setScreenBrightness(0.01f)
         } catch (e: Exception) {
             android.util.Log.w("SleepModeActivity", "Failed setting window lock screen flags", e)
         }
@@ -88,6 +102,7 @@ class SleepModeActivity : ComponentActivity() {
         setContent {
             FlashAlarmTheme {
                 SleepModeScreen(
+                    onSetScreenBrightness = ::setScreenBrightness,
                     onStopSleepGuard = {
                         try {
                             val stopIntent = Intent(this, SleepGuardService::class.java).apply {
@@ -123,6 +138,7 @@ class SleepModeActivity : ComponentActivity() {
 
 @Composable
 fun SleepModeScreen(
+    onSetScreenBrightness: (Float) -> Unit = {},
     onStopSleepGuard: () -> Unit
 ) {
     val app = androidx.compose.ui.platform.LocalContext.current.applicationContext as FlashAlarmApp
@@ -132,6 +148,7 @@ fun SleepModeScreen(
 
     var currentTimeStr by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+    var isAwakeBrightness by remember { mutableStateOf(false) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -140,10 +157,28 @@ fun SleepModeScreen(
         }
     }
 
+    // Auto dim back to lowest hardware brightness after gentle 6-second tap illumination
+    LaunchedEffect(isAwakeBrightness) {
+        if (isAwakeBrightness) {
+            onSetScreenBrightness(0.12f)
+            delay(6000L)
+            onSetScreenBrightness(0.01f)
+            isAwakeBrightness = false
+        } else {
+            onSetScreenBrightness(0.01f)
+        }
+    }
+
     Box(
         modifier = Modifier
             .fillMaxSize()
             .background(PureBlack)
+            .clickable(
+                interactionSource = remember { MutableInteractionSource() },
+                indication = null
+            ) {
+                isAwakeBrightness = true
+            }
             .statusBarsPadding()
             .navigationBarsPadding()
             .padding(horizontal = 24.dp, vertical = 32.dp)
