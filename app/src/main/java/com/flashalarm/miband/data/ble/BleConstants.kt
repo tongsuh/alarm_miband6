@@ -79,9 +79,11 @@ object BleConstants {
     const val ALERT_LEVEL_VIBRATE_ONLY: Byte = 0x03
 
     // Sensor Commands (Actigraphy streaming)
-    val CMD_RAW_SENSOR_START_1 = byteArrayOf(0x01, 0x03, 0x19) // Accel 25Hz
-    val CMD_RAW_SENSOR_START_3 = byteArrayOf(0x02)             // Trigger stream
-    val CMD_RAW_SENSOR_STOP = byteArrayOf(0x03)                // Stop stream
+    val CMD_RAW_SENSOR_START_ACCEL_25HZ = byteArrayOf(0x01, 0x01, 0x19) // Dedicated Accel 25Hz
+    val CMD_RAW_SENSOR_START_ACCEL_ALT = byteArrayOf(0x01, 0x01)       // Accel 2-byte command
+    val CMD_RAW_SENSOR_START_1 = byteArrayOf(0x01, 0x03, 0x19)         // Combined 25Hz (Accel+PPG)
+    val CMD_RAW_SENSOR_START_3 = byteArrayOf(0x02)                     // Trigger / Flush FIFO stream
+    val CMD_RAW_SENSOR_STOP = byteArrayOf(0x03)                        // Stop / Reset stream
     val SENSOR_START_CMD = byteArrayOf(0x01, 0x01)
     val SENSOR_STOP_CMD = byteArrayOf(0x00)
 }

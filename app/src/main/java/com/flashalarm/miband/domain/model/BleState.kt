@@ -16,7 +16,11 @@ data class BleDeviceMetrics(
     val batteryPercent: Int = -1,
     val rssi: Int = 0,
     val isHrStreaming: Boolean = false,
-    val isMotionStreaming: Boolean = false
+    val isMotionStreaming: Boolean = false,
+    val rawSensorPacketsCount: Long = 0L,
+    val lastRawSampleX: Float = 0.0f,
+    val lastRawSampleY: Float = 0.0f,
+    val lastRawSampleZ: Float = 0.0f
 )
 
 data class BleDeviceInfo(
