@@ -524,7 +524,7 @@ fun UnifiedSettingsDialog(
 
                                 Spacer(modifier = Modifier.height(4.dp))
                                 Text(
-                                    text = "说明：采用华米原生硬件震动引擎，由手环独立定时器精准播放节奏，无屏幕弹窗且绝不丢脉冲。",
+                                    text = "说明：采用与 Gadgetbridge 对齐的实时警报通道，时序严格串行同步，设几次就精准物理震动几次。",
                                     fontSize = 10.sp,
                                     color = DarkTextTertiary,
                                     lineHeight = 14.sp
