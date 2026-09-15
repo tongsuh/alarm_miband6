@@ -336,15 +336,15 @@ fun UnifiedSettingsDialog(
 
                                     val movementDesc = when {
                                         !metrics.isMotionStreaming -> "待机"
-                                        metrics.actigraphyG < 0.020f -> "静止"
-                                        metrics.actigraphyG < 0.080f -> "轻微微动"
-                                        metrics.actigraphyG < 0.200f -> "肢体动作"
+                                        metrics.actigraphyG < 0.012f -> "静止"
+                                        metrics.actigraphyG < 0.060f -> "轻微微动"
+                                        metrics.actigraphyG < 0.180f -> "肢体动作"
                                         else -> "大幅体动/翻身"
                                     }
                                     Text(
                                         text = movementDesc,
                                         fontSize = 11.sp,
-                                        color = if (!metrics.isMotionStreaming) DarkTextTertiary else if (metrics.actigraphyG > 0.080f) HeartRateRed else MiBandCyan
+                                        color = if (!metrics.isMotionStreaming) DarkTextTertiary else if (metrics.actigraphyG > 0.060f) HeartRateRed else MiBandCyan
                                     )
                                 }
 
@@ -407,7 +407,7 @@ fun UnifiedSettingsDialog(
                                             onClick = {
                                                 if (connectionState == BleConnectionState.CONNECTED) {
                                                     bleManager.enableSensorNotifications(resetBaseline = true)
-                                                    Toast.makeText(context, "正在重新校准基准...", Toast.LENGTH_SHORT).show()
+                                                    Toast.makeText(context, "已重新校准动态滤波", Toast.LENGTH_SHORT).show()
                                                 } else {
                                                     Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
                                                 }
