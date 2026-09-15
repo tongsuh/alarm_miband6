@@ -707,35 +707,34 @@ class MiBandBleManager(
     private fun startMotionWatchdog(gatt: BluetoothGatt) {
         motionWatchdogJob?.cancel()
         motionWatchdogJob = scope.launch(Dispatchers.IO) {
-            Log.i(TAG, "Motion sensor watchdog started (monitors 0x0001 session & stalls)")
+            Log.i(TAG, "Motion sensor watchdog started (responsive stall monitor & clean session renewal)")
             while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isMotionStreaming) {
-                delay(10000L)
+                delay(1500L) // Fast 1.5s check interval
                 if (!_deviceMetrics.value.isMotionStreaming) break
                 val now = System.currentTimeMillis()
                 val idleMs = now - lastRawSensorPacketTimeMs
 
-                var huamiService = gatt.getService(BleConstants.UUID_SERVICE_HUAMI)
-                var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
-                if (sensorCtrlChar == null) {
-                    for (s in gatt.services) {
-                        val c = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
-                        if (c != null) { sensorCtrlChar = c; break }
+                // When packets are flowing (idleMs <= 1800ms), DO NOT interrupt the active hardware FIFO.
+                // Only take action when the 50s session naturally completes or stalls (>1800ms without packets):
+                if (idleMs > 1800L && totalRawSensorPackets > 0L) {
+                    var huamiService = gatt.getService(BleConstants.UUID_SERVICE_HUAMI)
+                    var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                    if (sensorCtrlChar == null) {
+                        for (s in gatt.services) {
+                            val c = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                            if (c != null) { sensorCtrlChar = c; break }
+                        }
                     }
-                }
 
-                if (sensorCtrlChar != null) {
-                    if (idleMs > 2500L && totalRawSensorPackets > 0L) {
-                        // Stream stalled (e.g. hit 50s firmware session timeout or queue full): revive stream!
-                        Log.w(TAG, "Motion stream stalled ($idleMs ms without packets). Re-triggering sensor session on 0x0001...")
+                    if (sensorCtrlChar != null) {
+                        Log.i(TAG, "Motion stream idle for ${idleMs}ms (50s session elapsed). Renewing 3-step activation...")
                         writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_1)
-                        delay(50L)
+                        delay(40L)
                         writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_2)
-                        delay(50L)
+                        delay(40L)
                         writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
-                    } else if (idleMs <= 2500L) {
-                        // Stream is active: proactively send trigger every 10s tick to keep 50s hardware session alive
-                        Log.d(TAG, "Refreshing CMD_RAW_SENSOR_START_3 [0x02] to 0x0001 to extend 50s hardware session window")
-                        writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
+                        // Reset timer baseline so we don't fire redundantly before first packet arrives
+                        lastRawSensorPacketTimeMs = System.currentTimeMillis()
                     }
                 }
             }
