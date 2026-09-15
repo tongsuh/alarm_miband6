@@ -104,8 +104,7 @@ class SleepRepository(
                 return@withContext
             }
 
-            // Each epoch is ~30 seconds or 1 minute
-            val epochMinutes = 1
+            // Each epoch is exactly 30 seconds (0.5 minutes)
             var awakeCount = 0
             var remCount = 0
             var lightCount = 0
@@ -120,10 +119,10 @@ class SleepRepository(
                 }
             }
 
-            val awakeMinutes = awakeCount * epochMinutes
-            val remMinutes = remCount * epochMinutes
-            val lightMinutes = lightCount * epochMinutes
-            val deepMinutes = deepCount * epochMinutes
+            val awakeMinutes = (awakeCount * 30) / 60
+            val remMinutes = (remCount * 30) / 60
+            val lightMinutes = (lightCount * 30) / 60
+            val deepMinutes = (deepCount * 30) / 60
 
             val netSleepMinutes = remMinutes + lightMinutes + deepMinutes
             val timeInBedMinutes = netSleepMinutes + awakeMinutes

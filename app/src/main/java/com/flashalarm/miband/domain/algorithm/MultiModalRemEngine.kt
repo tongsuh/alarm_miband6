@@ -21,14 +21,22 @@ class MultiModalRemEngine(
     private var sustainedStillnessEpochs: Int = 0
     private var lastCueTriggerTimeMs: Long = 0L
 
-    // Sliding buffers (last N samples / epochs)
-    private val recentHeartRates = ArrayDeque<Int>()
-    private val recentActigraphy = ArrayDeque<Float>()
+    // Dual sliding buffers
+    private val shortTermHeartRates = ArrayDeque<Int>() // Last 6 samples ~ 3 minutes (fast REM surge reaction)
+    private val longTermHeartRates = ArrayDeque<Int>()  // Last 60 samples ~ 30 minutes (nocturnal baseline tracking)
+    private val recentActigraphy = ArrayDeque<Float>()  // Last 8 samples ~ 4 minutes (muscle atonia context)
     private val recentAudioIrregularities = ArrayDeque<Float>()
 
     // Nocturnal baseline tracking (established during stable deep sleep)
     private var deepSleepBaselineHr: Float = 60.0f
     private var baselineEstablished = false
+
+    // Initial bedtime resting HR tracking for sleep onset dip detection
+    private var bedtimeBaselineHr: Float = 0.0f
+    private var bedtimeSamplesCount: Int = 0
+
+    // Transient arousal cooldown (1 epoch ~ 30s) after movement veto
+    private var movementArousalCooldown: Int = 0
 
     fun updateConfig(config: DreamCueConfig) {
         this.cueConfig = config
@@ -40,20 +48,26 @@ class MultiModalRemEngine(
         isSleepOnsetDetected = false
         sustainedStillnessEpochs = 0
         lastCueTriggerTimeMs = 0L
-        recentHeartRates.clear()
+        shortTermHeartRates.clear()
+        longTermHeartRates.clear()
         recentActigraphy.clear()
         recentAudioIrregularities.clear()
         baselineEstablished = false
         deepSleepBaselineHr = 60.0f
+        bedtimeBaselineHr = 0.0f
+        bedtimeSamplesCount = 0
+        movementArousalCooldown = 0
     }
 
     /**
      * Feed continuous sensor inputs into the staging engine:
-     * @param heartRate Current heart rate in BPM
+     * @param heartRate Current epoch mean heart rate in BPM (or -1 if offline)
      * @param actigraphyMagnitude Wrist acceleration magnitude delta or count (g)
      * @param audioIrregularity Breathing irregularity score [0.0 - 1.0], or -1.0 if audio unavailable
      * @param isAudioReliable true if ambient SNR is clean and audio permission enabled
      * @param currentTimeMs Timestamp of evaluation
+     * @param peakActigraphy Peak wrist acceleration spike in current 30s epoch (g)
+     * @param intraEpochHrStdDev Standard deviation of ~30 1Hz heart rate readings within current epoch
      */
     fun evaluateEpoch(
         heartRate: Int,
@@ -61,52 +75,71 @@ class MultiModalRemEngine(
         audioIrregularity: Float = -1.0f,
         isAudioReliable: Boolean = false,
         currentTimeMs: Long = System.currentTimeMillis(),
-        peakActigraphy: Float = actigraphyMagnitude
+        peakActigraphy: Float = actigraphyMagnitude,
+        intraEpochHrStdDev: Float = 0.0f
     ): RemStagingResult {
-        // 1. Maintain sliding window (last 60 samples ~ 30 minutes)
+        // 1. Maintain sliding windows
         if (heartRate in 36..219) {
-            recentHeartRates.addLast(heartRate)
-            if (recentHeartRates.size > 60) recentHeartRates.removeFirst()
+            shortTermHeartRates.addLast(heartRate)
+            if (shortTermHeartRates.size > 6) shortTermHeartRates.removeFirst() // 3 minutes
+
+            longTermHeartRates.addLast(heartRate)
+            if (longTermHeartRates.size > 60) longTermHeartRates.removeFirst() // 30 minutes
+
+            if (!isSleepOnsetDetected && bedtimeSamplesCount < 8) {
+                bedtimeBaselineHr = (bedtimeBaselineHr * bedtimeSamplesCount + heartRate) / (bedtimeSamplesCount + 1)
+                bedtimeSamplesCount++
+            }
         }
 
         recentActigraphy.addLast(actigraphyMagnitude)
-        if (recentActigraphy.size > 60) recentActigraphy.removeFirst()
+        if (recentActigraphy.size > 8) recentActigraphy.removeFirst() // 4 minutes
 
         if (isAudioReliable && audioIrregularity >= 0f) {
             recentAudioIrregularities.addLast(audioIrregularity)
             if (recentAudioIrregularities.size > 30) recentAudioIrregularities.removeFirst()
         }
 
-        // 2. Wrist Actigraphy: Muscle Atonia & VETO Trigger
-        val maxRecentMovement = kotlin.math.max(recentActigraphy.maxOrNull() ?: actigraphyMagnitude, peakActigraphy)
+        // 2. Wrist Actigraphy: Muscle Atonia & Dynamic VETO Trigger
+        // Fixed: Do NOT veto for 30 minutes based on historical peak! Veto only current moving epoch + 1 cooldown epoch (1 min total)
+        val isCurrentEpochMoving = peakActigraphy > 0.18f || actigraphyMagnitude > 0.14f
+        if (isCurrentEpochMoving) {
+            movementArousalCooldown = 1
+        } else if (movementArousalCooldown > 0) {
+            movementArousalCooldown--
+        }
+        val isVetoedByMovement = isCurrentEpochMoving || movementArousalCooldown > 0
+
         val avgMovement = if (recentActigraphy.isNotEmpty()) recentActigraphy.average().toFloat() else actigraphyMagnitude
-        val isVetoedByMovement = maxRecentMovement > 0.14f || peakActigraphy > 0.18f
+        // Atonia score: 1.0 when completely motionless (<0.015g), drops toward 0 when moving
+        val atoniaScore = (1.0f - (avgMovement / 0.08f)).coerceIn(0.0f, 1.0f)
 
-        // Atonia score: 1.0 when completely still (actigraphy < 0.02g), drops to 0 when moving
-        val atoniaScore = (1.0f - (avgMovement / 0.10f)).coerceIn(0.0f, 1.0f)
+        // 3. Autonomic PPG Heart Rate & Dispersion
+        val shortTermMeanHr = if (shortTermHeartRates.isNotEmpty()) shortTermHeartRates.average().toFloat() else heartRate.toFloat()
 
-        // 3. Autonomic PPG Heart Rate & HRV (CV = SD / Mean)
-        val currentMeanHr = if (recentHeartRates.isNotEmpty()) recentHeartRates.average().toFloat() else heartRate.toFloat()
-        val hrVariance = if (recentHeartRates.size > 5) {
-            val mean = currentMeanHr
-            recentHeartRates.map { (it - mean) * (it - mean) }.average().toFloat()
+        val hrVariance = if (shortTermHeartRates.size > 3) {
+            val mean = shortTermMeanHr
+            shortTermHeartRates.map { (it - mean) * (it - mean) }.average().toFloat()
         } else 0f
-        val hrStdDev = sqrt(hrVariance)
-        val hrvCv = if (currentMeanHr > 0) (hrStdDev / currentMeanHr) else 0f
+        val shortTermHrStdDev = sqrt(hrVariance)
+        val hrvCv = if (shortTermMeanHr > 0) (shortTermHrStdDev / shortTermMeanHr) else 0f
 
-        // Update deep sleep baseline during prolonged quiet, low-HR epochs
-        if (atoniaScore > 0.85f && hrvCv < 0.04f && currentMeanHr in 45.0f..85.0f) {
+        // Combined autonomic dispersion: combines intra-epoch micro-instability with 3-minute macro fluctuation
+        val combinedDispersion = kotlin.math.max(intraEpochHrStdDev, shortTermHrStdDev)
+
+        // Update deep sleep baseline during prolonged quiet, low-HR epochs:
+        if (atoniaScore > 0.85f && combinedDispersion < 1.2f && shortTermMeanHr in 42.0f..82.0f) {
             deepSleepBaselineHr = if (!baselineEstablished) {
                 baselineEstablished = true
-                currentMeanHr
+                shortTermMeanHr
             } else {
-                deepSleepBaselineHr * 0.95f + currentMeanHr * 0.05f
+                deepSleepBaselineHr * 0.98f + shortTermMeanHr * 0.02f
             }
         }
 
-        // Calculate HR surge over deep sleep baseline
+        // Calculate HR surge over deep sleep baseline using fast 3-minute short-term window:
         val hrSurgePercent = if (deepSleepBaselineHr > 0) {
-            ((currentMeanHr - deepSleepBaselineHr) / deepSleepBaselineHr).coerceAtLeast(0f)
+            ((shortTermMeanHr - deepSleepBaselineHr) / deepSleepBaselineHr).coerceAtLeast(0f)
         } else 0f
 
         // 4. Sleep Onset Detection State Machine (Cole-Kripke stillness + resting HR dip)
@@ -115,20 +148,15 @@ class MultiModalRemEngine(
             if (isStill) {
                 sustainedStillnessEpochs++
                 // Physiological Sleep Onset Dip check:
-                // Bedtime resting HR typically dips 2.5+ bpm below initial bedtime level, with HRV stabilizing
-                val initialHr = if (recentHeartRates.size >= 8) recentHeartRates.take(8).average().toFloat() else currentMeanHr
-                val hasHrDipped = initialHr > 0 && currentMeanHr > 0 && (initialHr - currentMeanHr >= 2.5f)
-                val isHrvStable = hrvCv in 0.01f..0.045f
+                // Bedtime resting HR typically dips 2.5+ bpm below initial bedtime level, with autonomic stabilization
+                val hasHrDipped = bedtimeSamplesCount >= 6 && bedtimeBaselineHr > 0 && (bedtimeBaselineHr - shortTermMeanHr >= 2.5f)
+                val isHrvStable = combinedDispersion < 1.3f
 
-                // Sleep onset confirmed if:
-                // 1) 16 sustained quiet epochs (8 mins) AND (HR dipped or HRV stabilized)
-                // 2) OR unbroken stillness for 24 epochs (12 mins) as physiological fallback
                 if ((sustainedStillnessEpochs >= 16 && (hasHrDipped || isHrvStable)) || sustainedStillnessEpochs >= 24) {
                     isSleepOnsetDetected = true
                     sleepOnsetDetectedTimeMs = currentTimeMs
                 }
             } else if (peakActigraphy > 0.15f || avgMovement > 0.10f) {
-                // User rolled over or got up
                 sustainedStillnessEpochs = (sustainedStillnessEpochs - 3).coerceAtLeast(0)
             }
         }
@@ -162,34 +190,50 @@ class MultiModalRemEngine(
             -1.0f
         }
 
-        // 6. Staging Decision
+        // 6. Ultradian 90-110m Sleep Cycle Soft Prior Model
+        val elapsedMinutes = if (isSleepOnsetDetected) elapsedSinceOnsetMs / 60000f else 0f
+        val ultradianPrior = if (isSleepOnsetDetected) calculateUltradianRemPrior(elapsedMinutes) else 0.05f
+
+        // 7. Staging Decision
         var determinedStage = SleepStage.AWAKE
         var remConfidence = 0.0f
 
-        if (isVetoedByMovement || avgMovement > 0.25f) {
+        // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
+        val isAutonomicSurge = (hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
+                (hrSurgePercent >= 0.11f) ||
+                (combinedDispersion >= 2.0f && hrSurgePercent >= 0.04f)
+
+        if (isVetoedByMovement || avgMovement > 0.20f) {
             determinedStage = SleepStage.AWAKE
             remConfidence = 0.0f
         } else if (atoniaScore > 0.70f) {
-            if (hrSurgePercent >= 0.08f && (hrvCv >= 0.05f || hrStdDev >= 3.5f)) {
+            if (isAutonomicSurge) {
                 determinedStage = SleepStage.REM
 
-                // 75% Wrist Actigraphy & PPG HR/HRV Score
-                val wristScore = (atoniaScore * 0.40f) +
-                        (hrSurgePercent.coerceIn(0.08f, 0.25f) / 0.25f * 0.35f) +
-                        (hrvCv.coerceIn(0.04f, 0.12f) / 0.12f * 0.25f)
+                // Sensor raw score (Atonia 35%, Surge 40%, Dispersion 25%)
+                val wristScore = (atoniaScore * 0.35f) +
+                        (hrSurgePercent.coerceIn(0.06f, 0.20f) / 0.20f * 0.40f) +
+                        (combinedDispersion.coerceIn(1.0f, 3.0f) / 3.0f * 0.25f)
 
-                if (isAudioReliable && avgAudioIrregularity >= 0f) {
-                    val audioScore = avgAudioIrregularity.coerceIn(0.0f, 1.0f)
-                    remConfidence = (wristScore * 0.75f) + (audioScore * 0.25f)
+                val multiModalSensorScore = if (isAudioReliable && avgAudioIrregularity >= 0f) {
+                    (wristScore * 0.75f) + (avgAudioIrregularity.coerceIn(0f, 1f) * 0.25f)
                 } else {
-                    remConfidence = wristScore.coerceIn(0.0f, 1.0f)
+                    wristScore
                 }
-            } else if (hrSurgePercent < 0.05f && hrvCv < 0.04f) {
+
+                // Soft Prior Bayesian Fusion: 78% Physical Sensors + 22% Ultradian Cycle Prior
+                remConfidence = ((multiModalSensorScore * 0.78f) + (ultradianPrior * 0.22f)).coerceIn(0.0f, 1.0f)
+
+                // Ground-truth override: If physical sensor evidence is overwhelming, do not let prior suppress it
+                if (multiModalSensorScore >= 0.85f) {
+                    remConfidence = kotlin.math.max(remConfidence, multiModalSensorScore)
+                }
+            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f) {
                 determinedStage = SleepStage.DEEP
                 remConfidence = 0.0f
             } else {
                 determinedStage = SleepStage.LIGHT
-                remConfidence = 0.15f
+                remConfidence = 0.12f * ultradianPrior
             }
         } else {
             determinedStage = SleepStage.LIGHT
@@ -200,7 +244,7 @@ class MultiModalRemEngine(
             remConfidence = 0.0f
         }
 
-        // 7. Lucid Dream Cueing Eligibility & Cooldown
+        // 8. Lucid Dream Cueing Eligibility & Cooldown
         val cooldownMs = cueConfig.cooldownMinutes * 60 * 1000L
         val isCooldownPassed = (currentTimeMs - lastCueTriggerTimeMs) >= cooldownMs
         val meetsConfidence = remConfidence >= cueConfig.confidenceThreshold
@@ -213,7 +257,7 @@ class MultiModalRemEngine(
         val shouldTrigger = isEligible && isCooldownPassed
 
         val triggerReason = when {
-            shouldTrigger -> "双重印证命中REM高置信期 (置信度 ${(remConfidence * 100).toInt()}%)"
+            shouldTrigger -> "多模态印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
             isVetoedByMovement -> "手腕体动一票否决"
             !isSleepOnsetDetected -> "正在监测入睡状态 (静息沉淀 ${sustainedStillnessEpochs}/16)"
             sessionPhase == SleepSessionPhase.PROTECTION_PERIOD -> "处于前半夜深睡保护期 (剩余 $protectionRemainingMinutes 分钟)"
@@ -234,7 +278,7 @@ class MultiModalRemEngine(
             triggerReason = triggerReason,
             atoniaScore = atoniaScore,
             hrSurgePercent = hrSurgePercent,
-            hrvDispersion = hrvCv,
+            hrvDispersion = combinedDispersion,
             audioIrregularity = if (avgAudioIrregularity >= 0f) avgAudioIrregularity else 0f,
             isVetoedByMovement = isVetoedByMovement,
             isWithinTimingWindow = isWithinTimingWindow,
@@ -244,6 +288,32 @@ class MultiModalRemEngine(
             sleepOnsetDetectedTimeMs = sleepOnsetDetectedTimeMs,
             timestamp = currentTimeMs
         )
+    }
+
+    /**
+     * Ultradian 90-110m sleep cycle soft prior probability.
+     * Computes expected REM probability based on elapsed sleep time.
+     */
+    fun calculateUltradianRemPrior(elapsedMinutes: Float): Float {
+        if (elapsedMinutes < 45f) return 0.05f
+        val standardCycleLen = 95.0f
+        val phaseInCycle = elapsedMinutes % standardCycleLen
+        val cycleIndex = (elapsedMinutes / standardCycleLen).toInt() + 1
+
+        val phasePrior = when {
+            phaseInCycle in 0.0f..45.0f -> 0.10f
+            phaseInCycle in 45.0f..65.0f -> 0.10f + ((phaseInCycle - 45.0f) / 20.0f) * 0.55f
+            else -> 0.65f + ((phaseInCycle - 65.0f) / 30.0f) * 0.25f // 65-95 min: 0.65 -> 0.90
+        }
+
+        val cycleMultiplier = when (cycleIndex) {
+            1 -> 0.6f
+            2 -> 1.0f
+            3 -> 1.25f
+            else -> 1.4f
+        }
+
+        return (phasePrior * cycleMultiplier).coerceIn(0.05f, 0.95f)
     }
 
     fun markSleepOnset(onsetMs: Long) {

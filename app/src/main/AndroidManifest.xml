@@ -58,7 +58,7 @@
             android:name=".service.SleepGuardService"
             android:enabled="true"
             android:exported="false"
-            android:foregroundServiceType="connectedDevice" />
+            android:foregroundServiceType="connectedDevice|microphone" />
 
     </application>
 

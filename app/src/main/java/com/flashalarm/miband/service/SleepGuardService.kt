@@ -63,6 +63,8 @@ class SleepGuardService : Service() {
 
     // Cache latest values for epoch evaluation
     private var lastHeartRate = 60
+    private var lastHeartRateReceivedTimeMs = 0L
+    private val epochHeartRateSamples = mutableListOf<Int>()
     private var lastActigraphy = 0.0f
     private val epochActigraphySamples = mutableListOf<Float>()
     private var currentActiveSessionId: Long = 0L
@@ -127,7 +129,12 @@ class SleepGuardService : Service() {
 
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                val fgsType = if (enableAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                }
+                startForeground(NOTIFICATION_ID, notification, fgsType)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
@@ -169,10 +176,14 @@ class SleepGuardService : Service() {
                 }
             }
 
-            // 5. Collect incoming sensor flows
+            // 5. Collect incoming sensor flows (1Hz continuous HR & 25Hz actigraphy)
             launch {
                 app.bleManager.heartRateFlow.collect { hr ->
                     lastHeartRate = hr
+                    lastHeartRateReceivedTimeMs = System.currentTimeMillis()
+                    synchronized(epochHeartRateSamples) {
+                        epochHeartRateSamples.add(hr)
+                    }
                 }
             }
             launch {
@@ -184,7 +195,7 @@ class SleepGuardService : Service() {
                 }
             }
 
-            // 6. Ensure high-frequency HR streaming for sleep onset detection
+            // 6. Ensure high-frequency HR streaming for continuous sleep monitoring
             app.bleManager.setHeartRateStreamingMode(true)
             // Enable 25Hz raw actigraphy streaming for sleep monitoring
             app.bleManager.enableSensorNotifications()
@@ -207,32 +218,38 @@ class SleepGuardService : Service() {
                     Pair(avg, max)
                 }
 
+                val (epochMeanHr, epochHrStdDev) = synchronized(epochHeartRateSamples) {
+                    val count = epochHeartRateSamples.size
+                    val mean = if (count > 0) epochHeartRateSamples.average().toFloat() else lastHeartRate.toFloat()
+                    val stdDev = if (count > 3) {
+                        val variance = epochHeartRateSamples.map { (it - mean) * (it - mean) }.average().toFloat()
+                        kotlin.math.sqrt(variance)
+                    } else 0f
+                    epochHeartRateSamples.clear()
+                    Pair(mean, stdDev)
+                }
+
+                val now = System.currentTimeMillis()
+                val isHrFresh = lastHeartRateReceivedTimeMs > 0L && (now - lastHeartRateReceivedTimeMs) < 45000L
+                val evaluatedHr = if (isHrFresh) epochMeanHr.toInt().coerceIn(36, 220) else lastHeartRate
+
                 val audioState = app.audioAnalyzer.state.value
                 val stagingResult = app.remEngine.evaluateEpoch(
-                    heartRate = lastHeartRate,
+                    heartRate = evaluatedHr,
                     actigraphyMagnitude = epochAvgAct,
                     audioIrregularity = if (audioState.isAudioReliable) audioState.irregularityScore else -1.0f,
                     isAudioReliable = audioState.isAudioReliable,
-                    currentTimeMs = System.currentTimeMillis(),
-                    peakActigraphy = epochMaxAct
+                    currentTimeMs = now,
+                    peakActigraphy = epochMaxAct,
+                    intraEpochHrStdDev = epochHrStdDev
                 )
 
                 _liveStaging.value = stagingResult
 
-                // Multi-Tier Adaptive Heart Rate Sampling:
-                // 1. DETECTING_ONSET: High-frequency continuous streaming (1Hz) to accurately track sleep onset dip & HRV stabilization
-                // 2. PROTECTION_PERIOD: Low-power standby (turn off continuous mode to save battery & turn off green LED during deep sleep)
-                // 3. DREAM_WINDOW_ACTIVE: High-frequency continuous streaming (1Hz) to capture REM heart rate surge & CV dispersion
-                when (stagingResult.sessionPhase) {
-                    SleepSessionPhase.DETECTING_ONSET -> {
-                        app.bleManager.setHeartRateStreamingMode(true)
-                    }
-                    SleepSessionPhase.PROTECTION_PERIOD -> {
-                        app.bleManager.setHeartRateStreamingMode(false)
-                    }
-                    SleepSessionPhase.DREAM_WINDOW_ACTIVE -> {
-                        app.bleManager.setHeartRateStreamingMode(true)
-                    }
+                // Maintain continuous 1Hz heart rate streaming throughout all sleep phases
+                // to guarantee baseline tracking and continuous hypnogram data
+                if (!app.bleManager.deviceMetrics.value.isHrStreaming && app.bleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
+                    app.bleManager.setHeartRateStreamingMode(true)
                 }
 
                 // Record epoch in DB (record peak actigraphy so movement spikes are faithfully captured)
@@ -240,7 +257,7 @@ class SleepGuardService : Service() {
                     sessionId = sessionId,
                     timestamp = stagingResult.timestamp,
                     stage = stagingResult.stage,
-                    heartRate = lastHeartRate,
+                    heartRate = evaluatedHr,
                     actigraphy = epochMaxAct,
                     audioIrregularity = stagingResult.audioIrregularity,
                     confidence = stagingResult.confidence
