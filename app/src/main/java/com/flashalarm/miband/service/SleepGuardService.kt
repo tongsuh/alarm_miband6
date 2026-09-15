@@ -80,16 +80,28 @@ class SleepGuardService : Service() {
         createNotificationChannel()
         acquireWakeLock()
 
+        val app = applicationContext as? FlashAlarmApp
+        val hasAudioPermission = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.RECORD_AUDIO
+        ) == PackageManager.PERMISSION_GRANTED
+        val enableAudio = app?.userPreferencesRepository?.cueConfig?.value?.enableAudioVerification == true && hasAudioPermission
+
         // Immediate promotion to foreground service in onCreate to guarantee system 5-second FGS contract
         val notification = buildNotification("正在监测睡眠体动与心率...")
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
+                val fgsType = if (enableAudio && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE
+                }
+                startForeground(NOTIFICATION_ID, notification, fgsType)
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed starting connectedDevice foreground service in onCreate", e)
+            Log.e(TAG, "Failed starting foreground service in onCreate", e)
         }
     }
 
