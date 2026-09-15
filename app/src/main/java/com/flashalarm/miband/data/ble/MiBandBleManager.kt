@@ -117,7 +117,6 @@ class MiBandBleManager(
     private var isBaselineInitialized = false
     private var smoothedActigraphy = 0f
     private var lastRawSensorPacketTimeMs = 0L
-    private var sensorKeepAliveJob: Job? = null
     private var totalRawSensorPackets: Long = 0L
     private var lastSampleX: Float = 0f
     private var lastSampleY: Float = 0f
@@ -304,8 +303,6 @@ class MiBandBleManager(
         authTimeoutJob = null
         hrKeepAliveJob?.cancel()
         hrKeepAliveJob = null
-        sensorKeepAliveJob?.cancel()
-        sensorKeepAliveJob = null
         actigraphyTickerJob?.cancel()
         actigraphyTickerJob = null
         stopVibration()
@@ -525,13 +522,11 @@ class MiBandBleManager(
 
                 gatt?.requestMtu(512)
 
-                // Subscribe HR + sensor directly (don't rely on descriptor write cascade)
+                // Subscribe HR notifications on auth ready (keep sensor stream idle for low-power standby)
                 scope.launch(Dispatchers.IO) {
                     delay(250L)
                     gatt?.let { g ->
                         subscribeHeartRate(g)
-                        delay(200L)
-                        enableSensorNotifications(g)
                     }
                 }
             }
@@ -604,13 +599,11 @@ class MiBandBleManager(
                         // Request MTU now after auth to optimize sensor data throughput
                         bluetoothGatt?.requestMtu(512)
 
-                        // Start heart rate & actigraphy sensor data subscriptions
+                        // Subscribe HR notifications on auth ready (keep sensor stream idle for low-power standby)
                         scope.launch(Dispatchers.IO) {
                             delay(250L)
                             bluetoothGatt?.let { g ->
                                 subscribeHeartRate(g)
-                                delay(200L)
-                                enableSensorNotifications(g)
                             }
                         }
                     }
@@ -688,6 +681,9 @@ class MiBandBleManager(
             Log.w(TAG, "enableSensorNotifications: bluetoothGatt is null")
             return
         }
+        // Request high connection priority (low latency 11.25~15ms interval) to prevent band FIFO overflow at 25Hz
+        g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_HIGH)
+
         if (resetBaseline) {
             isBaselineInitialized = false
             baselineMag = 0.0f
@@ -699,7 +695,6 @@ class MiBandBleManager(
         }
         _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
         startActigraphyTicker()
-        startSensorKeepAlive()
         scope.launch(Dispatchers.IO) {
             var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
             var sensorDataChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
@@ -752,18 +747,43 @@ class MiBandBleManager(
         }
     }
 
-    private fun startSensorKeepAlive() {
-        sensorKeepAliveJob?.cancel()
-        sensorKeepAliveJob = scope.launch(Dispatchers.IO) {
-            while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isMotionStreaming) {
-                delay(2500L) // 2.5s keepalive ping interval (Huami FIFO times out in 3~4s)
-                writeCharacteristic(
-                    BleConstants.UUID_SERVICE_HUAMI,
-                    BleConstants.UUID_CHAR_SENSOR_CTRL,
-                    BleConstants.CMD_RAW_SENSOR_START_3,
-                    forceNoResponse = true
-                )
+    fun disableSensorNotifications(gatt: BluetoothGatt? = bluetoothGatt) {
+        val g = gatt ?: bluetoothGatt ?: run {
+            Log.w(TAG, "disableSensorNotifications: bluetoothGatt is null")
+            return
+        }
+        actigraphyTickerJob?.cancel()
+        actigraphyTickerJob = null
+        _deviceMetrics.value = _deviceMetrics.value.copy(
+            isMotionStreaming = false,
+            actigraphyG = 0.0f
+        )
+        scope.launch(Dispatchers.IO) {
+            var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
+            var sensorDataChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
+            var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+
+            if (sensorDataChar == null || sensorCtrlChar == null) {
+                for (s in g.services) {
+                    if (sensorDataChar == null) sensorDataChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
+                    if (sensorCtrlChar == null) sensorCtrlChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                }
             }
+
+            if (sensorCtrlChar != null) {
+                Log.i(TAG, "Sending CMD_RAW_SENSOR_STOP [0x03] to 0x0001...")
+                writeCharacteristicSequential(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_STOP)
+                delay(60L)
+            }
+
+            if (sensorDataChar != null) {
+                Log.i(TAG, "Disabling sensor data notification on 0x0002 sequentially...")
+                disableNotificationSequential(g, sensorDataChar)
+            }
+
+            // Restore connection priority to BALANCED for battery power saving
+            g.requestConnectionPriority(BluetoothGatt.CONNECTION_PRIORITY_BALANCED)
+            Log.i(TAG, "Sensor stream stopped, connection priority restored to BALANCED")
         }
     }
 
@@ -1036,6 +1056,47 @@ class MiBandBleManager(
         Log.i(TAG, "enableNotificationSequential: ${characteristic.uuid} CCCD written with status=$status (success=$success)")
         delay(60L) // Pacing delay for BLE radio
         return@withLock success
+    }
+
+    suspend fun disableNotificationSequential(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        timeoutMs: Long = 2500L
+    ): Boolean = gattMutex.withLock {
+        val descriptor = characteristic.getDescriptor(BleConstants.UUID_DESCRIPTOR_CCCD)
+        if (descriptor == null) {
+            gatt.setCharacteristicNotification(characteristic, false)
+            return@withLock true
+        }
+
+        gatt.setCharacteristicNotification(characteristic, false)
+
+        val cccdValue = BluetoothGattDescriptor.DISABLE_NOTIFICATION_VALUE
+
+        val deferred = CompletableDeferred<Int>()
+        descriptorDeferredMap[characteristic.uuid] = deferred
+
+        val writeInitiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeDescriptor(descriptor, cccdValue)
+            status == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            descriptor.value = cccdValue
+            @Suppress("DEPRECATION")
+            gatt.writeDescriptor(descriptor)
+        }
+
+        if (!writeInitiated) {
+            descriptorDeferredMap.remove(characteristic.uuid)
+            return@withLock false
+        }
+
+        val status = withTimeoutOrNull(timeoutMs) {
+            deferred.await()
+        }
+        descriptorDeferredMap.remove(characteristic.uuid)
+        delay(60L)
+        return@withLock (status == BluetoothGatt.GATT_SUCCESS)
     }
 
     suspend fun writeCharacteristicSequential(

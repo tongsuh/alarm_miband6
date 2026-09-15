@@ -186,6 +186,8 @@ class SleepGuardService : Service() {
 
             // 6. Ensure high-frequency HR streaming for sleep onset detection
             app.bleManager.setHeartRateStreamingMode(true)
+            // Enable 25Hz raw actigraphy streaming for sleep monitoring
+            app.bleManager.enableSensorNotifications()
 
             // 7. Start 30-second epoch loop
             startEpochLoop(app, sessionId)
@@ -301,6 +303,7 @@ class SleepGuardService : Service() {
         app.audioPlayer.stopAudio()
         app.bleManager.stopVibration()
         app.bleManager.setHeartRateStreamingMode(false)
+        app.bleManager.disableSensorNotifications()
 
         serviceScope.launch {
             if (currentActiveSessionId > 0L) {
@@ -372,6 +375,7 @@ class SleepGuardService : Service() {
         try {
             val app = applicationContext as? FlashAlarmApp
             app?.bleManager?.setHeartRateStreamingMode(false)
+            app?.bleManager?.disableSensorNotifications()
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
             }

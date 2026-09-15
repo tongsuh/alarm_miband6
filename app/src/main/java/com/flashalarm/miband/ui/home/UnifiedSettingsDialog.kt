@@ -66,6 +66,7 @@ import com.flashalarm.miband.data.ble.MiBandBleManager
 import com.flashalarm.miband.domain.model.BleConnectionState
 import com.flashalarm.miband.domain.model.CustomizableVibrationPattern
 import com.flashalarm.miband.domain.model.DreamCueConfig
+import com.flashalarm.miband.service.SleepGuardService
 import com.flashalarm.miband.ui.theme.AlertPurple
 import com.flashalarm.miband.ui.theme.DarkBorder
 import com.flashalarm.miband.ui.theme.DarkSurface
@@ -126,6 +127,11 @@ fun UnifiedSettingsDialog(
             bleManager.stopVibration()
             if (isTestingAudio) {
                 audioPlayer.stopAudio()
+            }
+            // Shut off test sensor streaming when exiting settings dialog to preserve battery,
+            // unless sleep guard service is actively running
+            if (!SleepGuardService.isServiceRunning.value && metrics.isMotionStreaming) {
+                bleManager.disableSensorNotifications()
             }
         }
     }
@@ -392,31 +398,70 @@ fun UnifiedSettingsDialog(
 
                                 val isActivated = metrics.isMotionStreaming && metrics.rawSensorPacketsCount > 0
 
-                                Button(
-                                    onClick = {
-                                        if (connectionState == BleConnectionState.CONNECTED) {
-                                            bleManager.enableSensorNotifications(resetBaseline = isActivated)
-                                            Toast.makeText(
-                                                context,
-                                                if (isActivated) "正在重新校准基准..." else "正在激活传感器推流...",
-                                                Toast.LENGTH_SHORT
-                                            ).show()
-                                        } else {
-                                            Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
+                                if (isActivated) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Button(
+                                            onClick = {
+                                                if (connectionState == BleConnectionState.CONNECTED) {
+                                                    bleManager.enableSensorNotifications(resetBaseline = true)
+                                                    Toast.makeText(context, "正在重新校准基准...", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
+                                                }
+                                            },
+                                            modifier = Modifier.weight(1f).height(36.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155))
+                                        ) {
+                                            Text(
+                                                text = "重新校准",
+                                                fontSize = 12.sp,
+                                                color = Color.White,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
                                         }
-                                    },
-                                    modifier = Modifier.fillMaxWidth().height(36.dp),
-                                    shape = RoundedCornerShape(8.dp),
-                                    colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (isActivated) Color(0xFF334155) else MiBandCyan
-                                    )
-                                ) {
-                                    Text(
-                                        text = if (isActivated) "重新校准" else "激活",
-                                        fontSize = 12.sp,
-                                        color = if (isActivated) Color.White else Color.Black,
-                                        fontWeight = FontWeight.SemiBold
-                                    )
+
+                                        Button(
+                                            onClick = {
+                                                bleManager.disableSensorNotifications()
+                                                Toast.makeText(context, "已停止体动测试", Toast.LENGTH_SHORT).show()
+                                            },
+                                            modifier = Modifier.weight(1f).height(36.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF475569))
+                                        ) {
+                                            Text(
+                                                text = "停止测试",
+                                                fontSize = 12.sp,
+                                                color = Color.White,
+                                                fontWeight = FontWeight.SemiBold
+                                            )
+                                        }
+                                    }
+                                } else {
+                                    Button(
+                                        onClick = {
+                                            if (connectionState == BleConnectionState.CONNECTED) {
+                                                bleManager.enableSensorNotifications(resetBaseline = false)
+                                                Toast.makeText(context, "正在激活传感器推流...", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(context, "请先连接手环", Toast.LENGTH_SHORT).show()
+                                            }
+                                        },
+                                        modifier = Modifier.fillMaxWidth().height(36.dp),
+                                        shape = RoundedCornerShape(8.dp),
+                                        colors = ButtonDefaults.buttonColors(containerColor = MiBandCyan)
+                                    ) {
+                                        Text(
+                                            text = "激活",
+                                            fontSize = 12.sp,
+                                            color = Color.Black,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
                                 }
                             }
                         }
