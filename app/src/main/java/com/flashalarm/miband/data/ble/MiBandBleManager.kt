@@ -103,7 +103,8 @@ class MiBandBleManager(
     private val _actigraphyFlow = MutableSharedFlow<Float>(extraBufferCapacity = 64)
     val actigraphyFlow: SharedFlow<Float> = _actigraphyFlow.asSharedFlow()
 
-    private var sensorWatchdogPingJob: Job? = null
+    private var hrKeepAliveJob: Job? = null
+    private var motionWatchdogJob: Job? = null
     private var actigraphyTickerJob: Job? = null
     private var vibrationJob: Job? = null
     private var isVibrating = false
@@ -114,7 +115,8 @@ class MiBandBleManager(
     private var prevSampleY = 0f
     private var prevSampleZ = 0f
     private var hasPrevSample = false
-    private var gravityScale = 1000f
+    private var lastPacketIndex = -1
+    private var gravityScale = 4096f
     private var smoothedActigraphy = 0f
     private var lastRawSensorPacketTimeMs = 0L
     private var totalRawSensorPackets: Long = 0L
@@ -300,11 +302,15 @@ class MiBandBleManager(
 
     fun disconnect() {
         authTimeoutJob?.cancel()
-        sensorWatchdogPingJob?.cancel()
-        sensorWatchdogPingJob = null
+        authTimeoutJob = null
+        hrKeepAliveJob?.cancel()
+        hrKeepAliveJob = null
+        motionWatchdogJob?.cancel()
+        motionWatchdogJob = null
         actigraphyTickerJob?.cancel()
         actigraphyTickerJob = null
         hasPrevSample = false
+        lastPacketIndex = -1
         stopVibration()
 
         descriptorDeferredMap.values.forEach { it.cancel() }
@@ -461,12 +467,8 @@ class MiBandBleManager(
                     }
                 }
             } else if (charUuid == BleConstants.UUID_CHAR_HEART_RATE_MEASUREMENT) {
-                if (_deviceMetrics.value.isHrStreaming) {
-                    scope.launch(Dispatchers.IO) {
-                        delay(150L)
-                        writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
-                        updateSensorWatchdogPing()
-                    }
+                if (_deviceMetrics.value.isHrStreaming && gatt != null) {
+                    startHrKeepAlive(gatt)
                 }
             }
         }
@@ -674,30 +676,76 @@ class MiBandBleManager(
         }
     }
 
-    private fun updateSensorWatchdogPing() {
-        val needsPing = _deviceMetrics.value.isHrStreaming || _deviceMetrics.value.isMotionStreaming
-        if (needsPing) {
-            if (sensorWatchdogPingJob?.isActive == true) return
-            sensorWatchdogPingJob = scope.launch(Dispatchers.IO) {
-                Log.i(TAG, "Sensor watchdog ping loop started (12s interval to 0x2A39)")
-                while (isActive && _connectionState.value == BleConnectionState.CONNECTED) {
-                    delay(12000L)
-                    val stillNeeded = _deviceMetrics.value.isHrStreaming || _deviceMetrics.value.isMotionStreaming
-                    if (!stillNeeded) break
-                    // Send 0x16 to standard Heart Rate Control (0x2A39) to reset the band firmware's 50s watchdog timer.
-                    // This is a pure keepalive control ping and does NOT turn on the green optical PPG LED.
-                    writeCharacteristic(
-                        BleConstants.UUID_SERVICE_HEART_RATE,
-                        BleConstants.UUID_CHAR_HEART_RATE_CONTROL,
-                        BleConstants.HR_PING_KEEPALIVE
-                    )
+    fun startHrKeepAlive(gatt: BluetoothGatt) {
+        hrKeepAliveJob?.cancel()
+        hrKeepAliveJob = scope.launch(Dispatchers.IO) {
+            Log.i(TAG, "Heart rate keepalive ping started (12s interval to 0x2A39)")
+            while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isHrStreaming) {
+                delay(12000L)
+                if (!_deviceMetrics.value.isHrStreaming) break
+                var hrService = gatt.getService(BleConstants.UUID_SERVICE_HEART_RATE)
+                var hrCtrlChar = hrService?.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
+                if (hrCtrlChar == null) {
+                    for (s in gatt.services) {
+                        val c = s.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
+                        if (c != null) { hrCtrlChar = c; break }
+                    }
                 }
-                Log.i(TAG, "Sensor watchdog ping loop stopped.")
+                if (hrCtrlChar != null) {
+                    writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_PING_KEEPALIVE)
+                }
             }
-        } else {
-            sensorWatchdogPingJob?.cancel()
-            sensorWatchdogPingJob = null
+            Log.i(TAG, "Heart rate keepalive ping stopped.")
         }
+    }
+
+    fun stopHrKeepAlive() {
+        hrKeepAliveJob?.cancel()
+        hrKeepAliveJob = null
+    }
+
+    private fun startMotionWatchdog(gatt: BluetoothGatt) {
+        motionWatchdogJob?.cancel()
+        motionWatchdogJob = scope.launch(Dispatchers.IO) {
+            Log.i(TAG, "Motion sensor watchdog started (monitors 0x0001 session & stalls)")
+            while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isMotionStreaming) {
+                delay(10000L)
+                if (!_deviceMetrics.value.isMotionStreaming) break
+                val now = System.currentTimeMillis()
+                val idleMs = now - lastRawSensorPacketTimeMs
+
+                var huamiService = gatt.getService(BleConstants.UUID_SERVICE_HUAMI)
+                var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                if (sensorCtrlChar == null) {
+                    for (s in gatt.services) {
+                        val c = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
+                        if (c != null) { sensorCtrlChar = c; break }
+                    }
+                }
+
+                if (sensorCtrlChar != null) {
+                    if (idleMs > 2500L && totalRawSensorPackets > 0L) {
+                        // Stream stalled (e.g. hit 50s firmware session timeout or queue full): revive stream!
+                        Log.w(TAG, "Motion stream stalled ($idleMs ms without packets). Re-triggering sensor session on 0x0001...")
+                        writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_1)
+                        delay(50L)
+                        writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_2)
+                        delay(50L)
+                        writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
+                    } else if (idleMs <= 2500L) {
+                        // Stream is active: proactively send trigger every 10s tick to keep 50s hardware session alive
+                        Log.d(TAG, "Refreshing CMD_RAW_SENSOR_START_3 [0x02] to 0x0001 to extend 50s hardware session window")
+                        writeCharacteristicSequential(gatt, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
+                    }
+                }
+            }
+            Log.i(TAG, "Motion sensor watchdog stopped.")
+        }
+    }
+
+    private fun stopMotionWatchdog() {
+        motionWatchdogJob?.cancel()
+        motionWatchdogJob = null
     }
 
     fun enableSensorNotifications(gatt: BluetoothGatt? = bluetoothGatt, resetBaseline: Boolean = false) {
@@ -710,6 +758,7 @@ class MiBandBleManager(
 
         if (resetBaseline) {
             hasPrevSample = false
+            lastPacketIndex = -1
             smoothedActigraphy = 0.0f
             _deviceMetrics.value = _deviceMetrics.value.copy(
                 actigraphyG = 0.0f
@@ -717,7 +766,7 @@ class MiBandBleManager(
             Log.i(TAG, "Sensor actigraphy dynamic filter reset requested.")
         }
         _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
-        updateSensorWatchdogPing()
+        startMotionWatchdog(g)
         startActigraphyTicker()
         scope.launch(Dispatchers.IO) {
             var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
@@ -776,15 +825,16 @@ class MiBandBleManager(
             Log.w(TAG, "disableSensorNotifications: bluetoothGatt is null")
             return
         }
+        stopMotionWatchdog()
         actigraphyTickerJob?.cancel()
         actigraphyTickerJob = null
         hasPrevSample = false
+        lastPacketIndex = -1
         smoothedActigraphy = 0.0f
         _deviceMetrics.value = _deviceMetrics.value.copy(
             isMotionStreaming = false,
             actigraphyG = 0.0f
         )
-        updateSensorWatchdogPing()
 
         scope.launch(Dispatchers.IO) {
             var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
@@ -865,11 +915,13 @@ class MiBandBleManager(
         }
 
         try {
-            // Determine packet format:
-            // Standard Huami: byte 0 is type (0x00=Accel, 0x01=PPG, 0x07=Timestamp), byte 1 is index, then 6-byte samples
+            // Huami raw sensor packet format on 0x0002:
+            // Byte 0: type (0x00 = Accelerometer, 0x01 = Optical PPG, 0x07 = Timestamp sync)
+            // Byte 1: sequence counter (0..255)
+            // Bytes 2+: 6-byte samples [rawX (2B), rawY (2B), rawZ (2B)]
             val type = data[0].toInt() and 0xFF
-            if (data.size >= 2 && type != 0x00 && (data.size - 2) % 6 != 0 && data.size % 6 != 0) {
-                // Non-accelerometer raw telemetry (e.g. PPG optical waveform or timestamp)
+            if (data.size < 8 || type != 0x00 || (data.size - 2) % 6 != 0) {
+                // Non-accelerometer raw telemetry (e.g. 0x07 timestamp sync packet or 0x01 optical packet)
                 _deviceMetrics.value = _deviceMetrics.value.copy(
                     rawSensorPacketsCount = totalRawSensorPackets,
                     isMotionStreaming = true
@@ -877,8 +929,18 @@ class MiBandBleManager(
                 return
             }
 
-            val offsetStart = if (data.size >= 8 && (data.size - 2) % 6 == 0) 2 else if (data.size % 6 == 0) 0 else 2
-            var offset = offsetStart
+            // Verify packet sequence continuity (detect BLE packet drops)
+            val packetIndex = data[1].toInt() and 0xFF
+            if (lastPacketIndex >= 0) {
+                val expectedIndex = (lastPacketIndex + 1) and 0xFF
+                if (packetIndex != expectedIndex) {
+                    // Packet drop detected: reset sample continuity so we don't compute bogus inter-packet delta
+                    hasPrevSample = false
+                }
+            }
+            lastPacketIndex = packetIndex
+
+            var offset = 2
             var sumDeltaG = 0.0f
             var sampleCount = 0
 
@@ -897,11 +959,11 @@ class MiBandBleManager(
                 lastSampleZ = z
 
                 val mag = sqrt(x * x + y * y + z * z)
-                if (mag > 50.0f) {
-                    if (gravityScale <= 50.0f) {
+                if (mag > 500.0f) {
+                    if (gravityScale <= 500.0f) {
                         gravityScale = mag
                     } else {
-                        // Slowly calibrate 1g magnitude scale (~1000 LSB/g)
+                        // Slowly calibrate 1g magnitude scale (~4096 LSB/g on Mi Band 6)
                         gravityScale = gravityScale * 0.999f + mag * 0.001f
                     }
                 }
@@ -911,10 +973,10 @@ class MiBandBleManager(
                     val dy = y - prevSampleY
                     val dz = z - prevSampleZ
                     val deltaMag = sqrt(dx * dx + dy * dy + dz * dz)
-                    val deltaG = deltaMag / gravityScale.coerceAtLeast(100.0f)
+                    val deltaG = deltaMag / gravityScale.coerceAtLeast(1000.0f)
 
-                    // Deadband thresholding (filter sensor thermal & quantization noise ~0.007g)
-                    val motion = if (deltaG < 0.008f) 0.0f else (deltaG - 0.008f) * 1.25f
+                    // Deadband thresholding: filter sensor thermal & quantization noise (~0.010g)
+                    val motion = if (deltaG < 0.010f) 0.0f else (deltaG - 0.010f) * 1.25f
                     sumDeltaG += motion
                     sampleCount++
                 }
@@ -936,7 +998,7 @@ class MiBandBleManager(
                     smoothedActigraphy * 0.70f + packetMotion * 0.30f
                 }
 
-                if (smoothedActigraphy < 0.003f) {
+                if (smoothedActigraphy < 0.005f) {
                     smoothedActigraphy = 0.0f
                 }
 
@@ -972,42 +1034,51 @@ class MiBandBleManager(
             Log.w(TAG, "setHeartRateStreamingMode: toggle busy, skipping rapid invocation")
             return
         }
+        val gatt = bluetoothGatt ?: run {
+            Log.w(TAG, "setHeartRateStreamingMode failed: bluetoothGatt is null")
+            return
+        }
         isHrToggleBusy = true
         scope.launch(Dispatchers.IO) {
             try {
-                if (isContinuous) {
-                    Log.i(TAG, "Enabling continuous heart rate streaming...")
-                    // 1. Ensure manual measurement is stopped first
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, byteArrayOf(0x15, 0x02, 0x00))
-                    delay(80L)
-                    // 2. Start continuous heart rate measurement
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
-                    delay(80L)
-                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = true)
-                    updateSensorWatchdogPing()
-                } else {
-                    Log.i(TAG, "Stopping continuous heart rate streaming...")
-                    // Stop continuous measurement
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_STOP_CONTINUOUS)
-                    delay(80L)
-                    writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, byteArrayOf(0x15, 0x02, 0x00))
-                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
-                    updateSensorWatchdogPing()
-                }
+                var hrService = gatt.getService(BleConstants.UUID_SERVICE_HEART_RATE)
+                var hrCtrlChar = hrService?.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
+                var hrMeasChar = hrService?.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_MEASUREMENT)
 
-                // Also sync 2021 chunked heart rate endpoint (0x001D) if on 2021 protocol
-                if (use2021Protocol) {
-                    try {
-                        val hrPayload = byteArrayOf(0x04, if (isContinuous) 0x01 else 0x00)
-                        val hrChunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, hrPayload, extendedFlags = true, encrypt = true)
-                        for (chunk in hrChunks) {
-                            delay(35L)
-                            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
-                        }
-                    } catch (e: Exception) {
-                        Log.w(TAG, "Error sending 2021 HR mode chunk", e)
+                if (hrCtrlChar == null || hrMeasChar == null) {
+                    for (s in gatt.services) {
+                        if (hrCtrlChar == null) hrCtrlChar = s.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
+                        if (hrMeasChar == null) hrMeasChar = s.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_MEASUREMENT)
                     }
                 }
+
+                if (isContinuous) {
+                    Log.i(TAG, "Enabling continuous heart rate streaming...")
+                    // 1. Ensure CCCD notification on 0x2A37 is active sequentially
+                    if (hrMeasChar != null) {
+                        enableNotificationSequential(gatt, hrMeasChar)
+                    }
+                    // 2. Ensure manual measurement is stopped first sequentially
+                    if (hrCtrlChar != null) {
+                        writeCharacteristicSequential(gatt, hrCtrlChar, byteArrayOf(0x15, 0x02, 0x00))
+                        delay(60L)
+                        // 3. Start continuous heart rate measurement sequentially (activates optical PPG engine & green LED)
+                        writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_START_CONTINUOUS)
+                    }
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = true)
+                    startHrKeepAlive(gatt)
+                } else {
+                    Log.i(TAG, "Stopping continuous heart rate streaming...")
+                    stopHrKeepAlive()
+                    if (hrCtrlChar != null) {
+                        writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_STOP_CONTINUOUS)
+                        delay(60L)
+                        writeCharacteristicSequential(gatt, hrCtrlChar, byteArrayOf(0x15, 0x02, 0x00))
+                    }
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Error in setHeartRateStreamingMode", e)
             } finally {
                 delay(300L) // Debounce window
                 isHrToggleBusy = false
