@@ -465,7 +465,7 @@ class MiBandBleManager(
                     scope.launch(Dispatchers.IO) {
                         delay(150L)
                         writeCharacteristic(BleConstants.UUID_SERVICE_HEART_RATE, BleConstants.UUID_CHAR_HEART_RATE_CONTROL, BleConstants.HR_START_CONTINUOUS)
-                        startHrKeepAlive()
+                        updateSensorWatchdogPing()
                     }
                 }
             }
