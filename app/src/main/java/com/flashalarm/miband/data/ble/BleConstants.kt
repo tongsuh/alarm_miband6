@@ -78,12 +78,11 @@ object BleConstants {
     const val ALERT_LEVEL_PHONE_CALL: Byte = 0x02
     const val ALERT_LEVEL_VIBRATE_ONLY: Byte = 0x03
 
-    // Sensor Commands (Actigraphy streaming)
-    val CMD_RAW_SENSOR_START_ACCEL_25HZ = byteArrayOf(0x01, 0x01, 0x19) // Dedicated Accel 25Hz
-    val CMD_RAW_SENSOR_START_ACCEL_ALT = byteArrayOf(0x01, 0x01)       // Accel 2-byte command
-    val CMD_RAW_SENSOR_START_1 = byteArrayOf(0x01, 0x03, 0x19)         // Combined 25Hz (Accel+PPG)
-    val CMD_RAW_SENSOR_START_3 = byteArrayOf(0x02)                     // Trigger / Flush FIFO stream
-    val CMD_RAW_SENSOR_STOP = byteArrayOf(0x03)                        // Stop / Reset stream
+    // Sensor Commands (Huami 2021 Raw Actigraphy streaming)
+    val CMD_RAW_SENSOR_START_1 = byteArrayOf(0x01, 0x03, 0x19)                       // Mode 25Hz combined (band replies 10:01:03:05)
+    val CMD_RAW_SENSOR_START_2 = byteArrayOf(0x01, 0x03, 0x00, 0x00, 0x00, 0x19)     // Params 25Hz (band replies 10:01:01:05)
+    val CMD_RAW_SENSOR_START_3 = byteArrayOf(0x02)                                   // Trigger stream (band replies 10:02:01)
+    val CMD_RAW_SENSOR_STOP = byteArrayOf(0x03)                                      // Stop stream (band replies 10:03:01)
     val SENSOR_START_CMD = byteArrayOf(0x01, 0x01)
     val SENSOR_STOP_CMD = byteArrayOf(0x00)
 }

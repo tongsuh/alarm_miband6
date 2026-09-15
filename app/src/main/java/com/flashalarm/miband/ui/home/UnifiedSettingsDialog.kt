@@ -359,14 +359,18 @@ fun UnifiedSettingsDialog(
                                     val streamStatus = if (metrics.rawSensorPacketsCount > 0) {
                                         "原始流 (${metrics.rawSensorPacketsCount}包)"
                                     } else if (metrics.isMotionStreaming) {
-                                        "等待手环推流..."
+                                        "推流建立中..."
                                     } else {
                                         "待机"
                                     }
                                     Text(
                                         text = streamStatus,
                                         fontSize = 11.sp,
-                                        color = if (metrics.rawSensorPacketsCount > 0) MiBandCyan else DarkTextTertiary
+                                        color = when {
+                                            metrics.rawSensorPacketsCount > 0 -> MiBandCyan
+                                            metrics.isMotionStreaming -> Color(0xFFF59E0B)
+                                            else -> DarkTextTertiary
+                                        }
                                     )
                                 }
 
@@ -393,7 +397,7 @@ fun UnifiedSettingsDialog(
                                             bleManager.enableSensorNotifications(resetBaseline = isStreaming)
                                             Toast.makeText(
                                                 context,
-                                                if (isStreaming) "已重置基准并重新激活体动流" else "已启动体动流检测",
+                                                if (isStreaming) "正在激活手环传感器推流并重置基准..." else "正在启动体动流检测...",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } else {
@@ -407,7 +411,7 @@ fun UnifiedSettingsDialog(
                                     )
                                 ) {
                                     Text(
-                                        text = if (metrics.isMotionStreaming) "重新校准 / 激活体动流" else "启动体动检测",
+                                        text = if (metrics.isMotionStreaming) "一键激活 / 重新校准体动流" else "启动体动检测",
                                         fontSize = 12.sp,
                                         color = if (metrics.isMotionStreaming) Color.White else Color.Black,
                                         fontWeight = FontWeight.SemiBold

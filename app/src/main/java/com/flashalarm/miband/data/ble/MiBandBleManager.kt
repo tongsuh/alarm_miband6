@@ -126,6 +126,7 @@ class MiBandBleManager(
     // Sequential GATT operation synchronization
     private val gattMutex = Mutex()
     private val descriptorDeferredMap = ConcurrentHashMap<UUID, CompletableDeferred<Int>>()
+    private val characteristicWriteDeferredMap = ConcurrentHashMap<UUID, CompletableDeferred<Int>>()
 
     fun setTargetDevice(name: String, mac: String, authKeyHex: String, use2021: Boolean = true) {
         this.use2021Protocol = use2021
@@ -311,6 +312,8 @@ class MiBandBleManager(
 
         descriptorDeferredMap.values.forEach { it.cancel() }
         descriptorDeferredMap.clear()
+        characteristicWriteDeferredMap.values.forEach { it.cancel() }
+        characteristicWriteDeferredMap.clear()
         totalRawSensorPackets = 0L
 
         bluetoothGatt?.let { gatt ->
@@ -472,7 +475,11 @@ class MiBandBleManager(
         }
 
         override fun onCharacteristicWrite(gatt: BluetoothGatt?, characteristic: BluetoothGattCharacteristic?, status: Int) {
-            Log.d(TAG, "onCharacteristicWrite uuid=${characteristic?.uuid}, status=$status")
+            val charUuid = characteristic?.uuid
+            Log.d(TAG, "onCharacteristicWrite uuid=$charUuid, status=$status")
+            if (charUuid != null) {
+                characteristicWriteDeferredMap.remove(charUuid)?.complete(status)
+            }
             if (status != BluetoothGatt.GATT_SUCCESS) {
                 Log.w(TAG, "Characteristic write not SUCCESS: status=$status")
             }
@@ -644,6 +651,11 @@ class MiBandBleManager(
                 parseActigraphyData(value)
             }
 
+            BleConstants.UUID_CHAR_SENSOR_CTRL -> {
+                val hex = value.joinToString(separator = " ") { "%02X".format(it) }
+                Log.i(TAG, "Huami Sensor Control (0x0001) notification ACK: [$hex]")
+            }
+
             BleConstants.UUID_CHAR_REALTIME_STEPS -> {
                 parseRealtimeStepsData(value)
             }
@@ -706,7 +718,28 @@ class MiBandBleManager(
                 }
             }
 
-            // 1. Enable CCCD on 0x0002 (Sensor Data) using sequential dispatcher
+            // Step 1: Ensure continuous heart rate measurement is active (wakes optical/sensor subsystem for 0x03 mask)
+            var hrService = g.getService(BleConstants.UUID_SERVICE_HEART_RATE)
+            var hrCtrlChar = hrService?.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
+            if (hrCtrlChar == null) {
+                for (s in g.services) {
+                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
+                    if (c != null) { hrCtrlChar = c; break }
+                }
+            }
+            if (hrCtrlChar != null) {
+                Log.i(TAG, "Activating continuous heart rate to power sensor hub...")
+                writeCharacteristicSequential(g, hrCtrlChar, BleConstants.HR_START_CONTINUOUS)
+                startHrKeepAlive()
+            }
+
+            // Step 2: Enable CCCD on 0x0001 (Sensor Ctrl) so band can ACK our commands
+            if (sensorCtrlChar != null) {
+                Log.i(TAG, "Enabling sensor control notification on 0x0001 sequentially...")
+                enableNotificationSequential(g, sensorCtrlChar)
+            }
+
+            // Step 3: Enable CCCD on 0x0002 (Sensor Data) using sequential dispatcher
             if (sensorDataChar != null) {
                 Log.i(TAG, "Enabling sensor data notification on 0x0002 sequentially...")
                 val success = enableNotificationSequential(g, sensorDataChar)
@@ -715,39 +748,37 @@ class MiBandBleManager(
                 Log.w(TAG, "0x0002 (UUID_CHAR_SENSOR_DATA) not found on device!")
             }
 
-            // 2. Enable CCCD on 0x0007 (Realtime steps & movement) using sequential dispatcher
+            // Step 4: Enable CCCD on 0x0007 (Realtime steps & movement) using sequential dispatcher
             if (stepsChar != null) {
                 Log.i(TAG, "Enabling realtime steps notification on 0x0007 sequentially...")
                 val success = enableNotificationSequential(g, stepsChar)
                 Log.i(TAG, "0x0007 notification enabled result: $success")
             }
 
-            // 3. Sensor Activation sequence on 0x0001 (Control)
-            // Step A: Stop previous sensor streams to reset hardware FIFO state
-            Log.i(TAG, "Sending CMD_RAW_SENSOR_STOP [0x03] to 0x0001...")
-            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_STOP, forceNoResponse = true)
-            delay(100L)
+            // Step 5: Send standard Huami 2021 raw sensor activation sequence to 0x0001
+            if (sensorCtrlChar != null) {
+                // A. Stop previous sensor streams to reset hardware FIFO state
+                Log.i(TAG, "Sending CMD_RAW_SENSOR_STOP [0x03] to 0x0001...")
+                writeCharacteristicSequential(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_STOP)
+                delay(60L)
 
-            // Step B: Send dedicated 25Hz accelerometer command [0x01, 0x01, 0x19]
-            Log.i(TAG, "Sending CMD_RAW_SENSOR_START_ACCEL_25HZ [0x01, 0x01, 0x19] to 0x0001...")
-            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_ACCEL_25HZ, forceNoResponse = true)
-            delay(80L)
+                // B. Send CMD_RAW_SENSOR_START_1 [0x01, 0x03, 0x19] (band replies 10:01:03:05)
+                Log.i(TAG, "Sending CMD_RAW_SENSOR_START_1 [0x01, 0x03, 0x19] to 0x0001...")
+                writeCharacteristicSequential(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_1)
+                delay(60L)
 
-            // Step C: Send 2-byte accel start command [0x01, 0x01] for broader Huami firmware support
-            Log.i(TAG, "Sending CMD_RAW_SENSOR_START_ACCEL_ALT [0x01, 0x01] to 0x0001...")
-            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_ACCEL_ALT, forceNoResponse = true)
-            delay(80L)
+                // C. Send CMD_RAW_SENSOR_START_2 [0x01, 0x03, 0x00, 0x00, 0x00, 0x19] (band replies 10:01:01:05)
+                Log.i(TAG, "Sending CMD_RAW_SENSOR_START_2 [0x01, 0x03, 0x00, 0x00, 0x00, 0x19] to 0x0001...")
+                writeCharacteristicSequential(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_2)
+                delay(60L)
 
-            // Step D: Send combined start command [0x01, 0x03, 0x19] as fallback
-            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_1, forceNoResponse = true)
-            delay(80L)
+                // D. Send CMD_RAW_SENSOR_START_3 [0x02] trigger to kick-start hardware FIFO pushing (band replies 10:02:01)
+                Log.i(TAG, "Sending CMD_RAW_SENSOR_START_3 [0x02] trigger to 0x0001...")
+                writeCharacteristicSequential(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
+                delay(60L)
+            }
 
-            // Step E: Send stream trigger [0x02] to kick-start hardware FIFO pushing
-            Log.i(TAG, "Sending CMD_RAW_SENSOR_START_3 [0x02] trigger to 0x0001...")
-            writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_SENSOR_CTRL, BleConstants.CMD_RAW_SENSOR_START_3, forceNoResponse = true)
-            delay(100L)
-
-            // 4. If 2021 protocol, also enable realtime steps on endpoint 0x0016
+            // Step 6: If 2021 protocol, also enable realtime steps on endpoint 0x0016
             if (use2021Protocol) {
                 try {
                     val stepsPayload = byteArrayOf(BleConstants.STEPS_CMD_ENABLE_REALTIME) // 0x05
@@ -834,13 +865,30 @@ class MiBandBleManager(
     }
 
     private fun parseActigraphyData(data: ByteArray) {
-        if (data.size < 6) return
+        if (data.isEmpty()) return
         lastRawSensorPacketTimeMs = System.currentTimeMillis()
         totalRawSensorPackets++
+
+        if (totalRawSensorPackets <= 5L || totalRawSensorPackets % 50L == 1L) {
+            val hex = data.take(16).joinToString(" ") { "%02X".format(it) }
+            Log.d(TAG, "Raw sensor packet #$totalRawSensorPackets: size=${data.size}, data=[$hex]")
+        }
+
         try {
-            // Standard Mi Band raw sensor packet:
-            // 2-byte sequence header + N x 6-byte samples (X, Y, Z as 16-bit signed little-endian)
-            var offset = if (data.size % 6 == 2) 2 else 0
+            // Determine packet format:
+            // Standard Huami: byte 0 is type (0x00=Accel, 0x01=PPG, 0x07=Timestamp), byte 1 is index, then 6-byte samples
+            val type = data[0].toInt() and 0xFF
+            if (data.size >= 2 && type != 0x00 && (data.size - 2) % 6 != 0 && data.size % 6 != 0) {
+                // Non-accelerometer raw telemetry (e.g. PPG optical waveform or timestamp)
+                _deviceMetrics.value = _deviceMetrics.value.copy(
+                    rawSensorPacketsCount = totalRawSensorPackets,
+                    isMotionStreaming = true
+                )
+                return
+            }
+
+            val offsetStart = if (data.size >= 8 && (data.size - 2) % 6 == 0) 2 else if (data.size % 6 == 0) 0 else 2
+            var offset = offsetStart
             var sumDisplacement = 0.0f
             var sampleCount = 0
 
@@ -922,6 +970,11 @@ class MiBandBleManager(
                 if (totalRawSensorPackets % 50L == 1L) {
                     Log.d(TAG, "Raw sensor stream alive! Packet #$totalRawSensorPackets: X=$lastSampleX, Y=$lastSampleY, Z=$lastSampleZ, Disp=$avgDisp, ActigraphyG=$smoothedActigraphy")
                 }
+            } else {
+                _deviceMetrics.value = _deviceMetrics.value.copy(
+                    rawSensorPacketsCount = totalRawSensorPackets,
+                    isMotionStreaming = true
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing actigraphy sensor bytes", e)
@@ -1042,6 +1095,63 @@ class MiBandBleManager(
         Log.i(TAG, "enableNotificationSequential: ${characteristic.uuid} CCCD written with status=$status (success=$success)")
         delay(60L) // Pacing delay for BLE radio
         return@withLock success
+    }
+
+    suspend fun writeCharacteristicSequential(
+        gatt: BluetoothGatt,
+        characteristic: BluetoothGattCharacteristic,
+        data: ByteArray,
+        timeoutMs: Long = 2500L
+    ): Boolean = gattMutex.withLock {
+        val writeType = if ((characteristic.properties and BluetoothGattCharacteristic.PROPERTY_WRITE) != 0) {
+            BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
+        } else {
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        }
+        characteristic.writeType = writeType
+
+        val deferred = if (writeType == BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT) {
+            val d = CompletableDeferred<Int>()
+            characteristicWriteDeferredMap[characteristic.uuid] = d
+            d
+        } else {
+            null
+        }
+
+        val writeInitiated = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            val status = gatt.writeCharacteristic(characteristic, data, writeType)
+            status == BluetoothStatusCodes.SUCCESS
+        } else {
+            @Suppress("DEPRECATION")
+            characteristic.value = data
+            @Suppress("DEPRECATION")
+            gatt.writeCharacteristic(characteristic)
+        }
+
+        if (!writeInitiated) {
+            Log.e(TAG, "writeCharacteristicSequential: write call rejected by Android BLE stack for ${characteristic.uuid}")
+            if (deferred != null) characteristicWriteDeferredMap.remove(characteristic.uuid)
+            return@withLock false
+        }
+
+        if (deferred != null) {
+            val status = withTimeoutOrNull(timeoutMs) {
+                deferred.await()
+            }
+            characteristicWriteDeferredMap.remove(characteristic.uuid)
+            if (status == null) {
+                Log.w(TAG, "writeCharacteristicSequential: timed out waiting for onCharacteristicWrite for ${characteristic.uuid}")
+                return@withLock false
+            }
+            val success = (status == BluetoothGatt.GATT_SUCCESS)
+            val hex = data.joinToString(" ") { "%02X".format(it) }
+            Log.i(TAG, "writeCharacteristicSequential: ${characteristic.uuid} data=[$hex] status=$status (success=$success)")
+            delay(50L) // Radio pacing delay
+            return@withLock success
+        } else {
+            delay(60L)
+            return@withLock true
+        }
     }
 
     private fun enableNotification(gatt: BluetoothGatt, characteristic: BluetoothGattCharacteristic) {
