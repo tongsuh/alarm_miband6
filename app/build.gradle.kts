@@ -13,8 +13,8 @@ android {
         applicationId = "com.flashalarm.miband"
         minSdk = 26
         targetSdk = 34
-        versionCode = 16
-        versionName = "1.1.15"
+        versionCode = 17
+        versionName = "1.1.16"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {

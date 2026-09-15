@@ -692,14 +692,10 @@ class MiBandBleManager(
             isBaselineInitialized = false
             baselineMag = 0.0f
             smoothedActigraphy = 0.0f
-            totalRawSensorPackets = 0L
             _deviceMetrics.value = _deviceMetrics.value.copy(
-                actigraphyG = 0.0f,
-                rawSensorPacketsCount = 0L,
-                lastRawSampleX = 0f,
-                lastRawSampleY = 0f,
-                lastRawSampleZ = 0f
+                actigraphyG = 0.0f
             )
+            Log.i(TAG, "Sensor actigraphy baseline reset requested.")
         }
         _deviceMetrics.value = _deviceMetrics.value.copy(isMotionStreaming = true)
         startActigraphyTicker()
@@ -708,38 +704,21 @@ class MiBandBleManager(
             var huamiService = g.getService(BleConstants.UUID_SERVICE_HUAMI)
             var sensorDataChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
             var sensorCtrlChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
-            var stepsChar = huamiService?.getCharacteristic(BleConstants.UUID_CHAR_REALTIME_STEPS)
 
-            if (sensorDataChar == null || sensorCtrlChar == null || stepsChar == null) {
+            if (sensorDataChar == null || sensorCtrlChar == null) {
                 for (s in g.services) {
                     if (sensorDataChar == null) sensorDataChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_DATA)
                     if (sensorCtrlChar == null) sensorCtrlChar = s.getCharacteristic(BleConstants.UUID_CHAR_SENSOR_CTRL)
-                    if (stepsChar == null) stepsChar = s.getCharacteristic(BleConstants.UUID_CHAR_REALTIME_STEPS)
                 }
             }
 
-            // Step 1: Ensure continuous heart rate measurement is active (wakes optical/sensor subsystem for 0x03 mask)
-            var hrService = g.getService(BleConstants.UUID_SERVICE_HEART_RATE)
-            var hrCtrlChar = hrService?.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
-            if (hrCtrlChar == null) {
-                for (s in g.services) {
-                    val c = s.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
-                    if (c != null) { hrCtrlChar = c; break }
-                }
-            }
-            if (hrCtrlChar != null) {
-                Log.i(TAG, "Activating continuous heart rate to power sensor hub...")
-                writeCharacteristicSequential(g, hrCtrlChar, BleConstants.HR_START_CONTINUOUS)
-                startHrKeepAlive()
-            }
-
-            // Step 2: Enable CCCD on 0x0001 (Sensor Ctrl) so band can ACK our commands
+            // Step 1: Enable CCCD on 0x0001 (Sensor Ctrl) so band can ACK our commands
             if (sensorCtrlChar != null) {
                 Log.i(TAG, "Enabling sensor control notification on 0x0001 sequentially...")
                 enableNotificationSequential(g, sensorCtrlChar)
             }
 
-            // Step 3: Enable CCCD on 0x0002 (Sensor Data) using sequential dispatcher
+            // Step 2: Enable CCCD on 0x0002 (Sensor Data) using sequential dispatcher
             if (sensorDataChar != null) {
                 Log.i(TAG, "Enabling sensor data notification on 0x0002 sequentially...")
                 val success = enableNotificationSequential(g, sensorDataChar)
@@ -748,14 +727,7 @@ class MiBandBleManager(
                 Log.w(TAG, "0x0002 (UUID_CHAR_SENSOR_DATA) not found on device!")
             }
 
-            // Step 4: Enable CCCD on 0x0007 (Realtime steps & movement) using sequential dispatcher
-            if (stepsChar != null) {
-                Log.i(TAG, "Enabling realtime steps notification on 0x0007 sequentially...")
-                val success = enableNotificationSequential(g, stepsChar)
-                Log.i(TAG, "0x0007 notification enabled result: $success")
-            }
-
-            // Step 5: Send standard Huami 2021 raw sensor activation sequence to 0x0001
+            // Step 3: Send standard Huami 2021 raw sensor activation sequence to 0x0001 (accelerometer only, no green LED)
             if (sensorCtrlChar != null) {
                 // A. Stop previous sensor streams to reset hardware FIFO state
                 Log.i(TAG, "Sending CMD_RAW_SENSOR_STOP [0x03] to 0x0001...")
@@ -776,20 +748,6 @@ class MiBandBleManager(
                 Log.i(TAG, "Sending CMD_RAW_SENSOR_START_3 [0x02] trigger to 0x0001...")
                 writeCharacteristicSequential(g, sensorCtrlChar, BleConstants.CMD_RAW_SENSOR_START_3)
                 delay(60L)
-            }
-
-            // Step 6: If 2021 protocol, also enable realtime steps on endpoint 0x0016
-            if (use2021Protocol) {
-                try {
-                    val stepsPayload = byteArrayOf(BleConstants.STEPS_CMD_ENABLE_REALTIME) // 0x05
-                    val chunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_STEPS, stepsPayload, extendedFlags = true, encrypt = true)
-                    for (chunk in chunks) {
-                        delay(35L)
-                        writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk, forceNoResponse = true)
-                    }
-                } catch (e: Exception) {
-                    Log.w(TAG, "Failed enabling 2021 realtime steps stream", e)
-                }
             }
         }
     }
@@ -840,25 +798,8 @@ class MiBandBleManager(
             } else {
                 (data[0].toInt() and 0xFF)
             }
-
-            val stepDelta = if (lastStepsCount >= 0) (currentSteps - lastStepsCount).coerceAtLeast(0) else 0
             lastStepsCount = currentSteps
-
-            // Step delta acts as a fallback or enhancement if raw sensor stream is absent
-            val now = System.currentTimeMillis()
-            val isRawSensorActive = (now - lastRawSensorPacketTimeMs) < 4000L
-
-            if (!isRawSensorActive && stepDelta > 0) {
-                val movementG = if (stepDelta >= 5) 0.38f else 0.19f
-                smoothedActigraphy = if (smoothedActigraphy <= 0.0001f) movementG else (smoothedActigraphy * 0.5f + movementG * 0.5f)
-                _deviceMetrics.value = _deviceMetrics.value.copy(
-                    actigraphyG = smoothedActigraphy,
-                    isMotionStreaming = true,
-                    rawSensorPacketsCount = totalRawSensorPackets
-                )
-                _actigraphyFlow.tryEmit(smoothedActigraphy)
-                startActigraphyTicker()
-            }
+            // Actigraphy is 100% driven by raw sensor 0x0002; steps will NEVER touch actigraphy values.
         } catch (e: Exception) {
             Log.e(TAG, "Failed parsing realtime steps data", e)
         }

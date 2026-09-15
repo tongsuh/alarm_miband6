@@ -390,14 +390,15 @@ fun UnifiedSettingsDialog(
 
                                 Spacer(modifier = Modifier.height(10.dp))
 
+                                val isActivated = metrics.isMotionStreaming && metrics.rawSensorPacketsCount > 0
+
                                 Button(
                                     onClick = {
                                         if (connectionState == BleConnectionState.CONNECTED) {
-                                            val isStreaming = metrics.isMotionStreaming
-                                            bleManager.enableSensorNotifications(resetBaseline = isStreaming)
+                                            bleManager.enableSensorNotifications(resetBaseline = isActivated)
                                             Toast.makeText(
                                                 context,
-                                                if (isStreaming) "正在激活手环传感器推流并重置基准..." else "正在启动体动流检测...",
+                                                if (isActivated) "正在重新校准基准..." else "正在激活传感器推流...",
                                                 Toast.LENGTH_SHORT
                                             ).show()
                                         } else {
@@ -407,13 +408,13 @@ fun UnifiedSettingsDialog(
                                     modifier = Modifier.fillMaxWidth().height(36.dp),
                                     shape = RoundedCornerShape(8.dp),
                                     colors = ButtonDefaults.buttonColors(
-                                        containerColor = if (metrics.isMotionStreaming) Color(0xFF334155) else MiBandCyan
+                                        containerColor = if (isActivated) Color(0xFF334155) else MiBandCyan
                                     )
                                 ) {
                                     Text(
-                                        text = if (metrics.isMotionStreaming) "一键激活 / 重新校准体动流" else "启动体动检测",
+                                        text = if (isActivated) "重新校准" else "激活",
                                         fontSize = 12.sp,
-                                        color = if (metrics.isMotionStreaming) Color.White else Color.Black,
+                                        color = if (isActivated) Color.White else Color.Black,
                                         fontWeight = FontWeight.SemiBold
                                     )
                                 }
