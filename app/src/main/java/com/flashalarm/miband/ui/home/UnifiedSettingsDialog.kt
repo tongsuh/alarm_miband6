@@ -102,9 +102,13 @@ fun UnifiedSettingsDialog(
     var newProtocolEnabled by remember { mutableStateOf(use2021Protocol) }
     var isHrToggling by remember { mutableStateOf(false) }
 
+    LaunchedEffect(metrics.isHrStreaming) {
+        isHrToggling = false
+    }
+
     LaunchedEffect(isHrToggling) {
         if (isHrToggling) {
-            delay(500L)
+            delay(1200L)
             isHrToggling = false
         }
     }
@@ -277,6 +281,10 @@ fun UnifiedSettingsDialog(
                                 Button(
                                     onClick = {
                                         if (connectionState == BleConnectionState.CONNECTED) {
+                                            if (SleepGuardService.isServiceRunning.value && metrics.isHrStreaming) {
+                                                Toast.makeText(context, "入睡守护运行中，如需停止心率请先在主页停止守护", Toast.LENGTH_SHORT).show()
+                                                return@Button
+                                            }
                                             if (!isHrToggling) {
                                                 isHrToggling = true
                                                 bleManager.setHeartRateStreamingMode(!metrics.isHrStreaming)

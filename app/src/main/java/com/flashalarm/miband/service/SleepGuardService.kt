@@ -268,8 +268,6 @@ class SleepGuardService : Service() {
                     } else if (hrIdleMs > 45000L) {
                         Log.w(TAG, "Heart rate stream quiet for ${hrIdleMs}ms (>45s). Stage 1 recovery: sending soft refresh...")
                         app.bleManager.setHeartRateStreamingMode(true, force = true)
-                    } else if (!app.bleManager.deviceMetrics.value.isHrStreaming) {
-                        app.bleManager.setHeartRateStreamingMode(true, force = true)
                     }
                 }
 

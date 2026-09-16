@@ -1123,6 +1123,8 @@ class MiBandBleManager(
 
                 if (isContinuous) {
                     Log.i(TAG, "Enabling continuous heart rate streaming...")
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = true)
+
                     // 1. Ensure CCCD notification on 0x2A37 is active sequentially
                     if (hrMeasChar != null) {
                         enableNotificationSequential(gatt, hrMeasChar)
@@ -1134,17 +1136,52 @@ class MiBandBleManager(
                         // 3. Start continuous heart rate measurement sequentially (activates optical PPG engine & green LED)
                         writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_START_CONTINUOUS)
                     }
-                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = true)
+
+                    // 4. Also sync 2021 chunked heart rate endpoint (0x001D) if on 2021 protocol
+                    if (use2021Protocol) {
+                        try {
+                            val hrPayload = byteArrayOf(0x04, 0x01)
+                            val hrChunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, hrPayload, extendedFlags = true, encrypt = true)
+                            for (chunk in hrChunks) {
+                                delay(35L)
+                                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error sending 2021 HR start chunk", e)
+                        }
+                    }
+
                     startHrKeepAlive(gatt)
                 } else {
                     Log.i(TAG, "Stopping continuous heart rate streaming...")
                     stopHrKeepAlive()
+                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
+
+                    // 1. Disable CCCD notification on 0x2A37 sequentially so band stops transmitting HR packets
+                    if (hrMeasChar != null) {
+                        disableNotificationSequential(gatt, hrMeasChar)
+                    }
+
+                    // 2. Stop continuous and manual measurement sequentially
                     if (hrCtrlChar != null) {
                         writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_STOP_CONTINUOUS)
                         delay(60L)
                         writeCharacteristicSequential(gatt, hrCtrlChar, byteArrayOf(0x15, 0x02, 0x00))
                     }
-                    _deviceMetrics.value = _deviceMetrics.value.copy(isHrStreaming = false)
+
+                    // 3. Also sync 2021 chunked heart rate endpoint (0x001D) to stop optical PPG engine
+                    if (use2021Protocol) {
+                        try {
+                            val hrPayload = byteArrayOf(0x04, 0x00)
+                            val hrChunks = chunkedEncoder.encode(BleConstants.CHUNKED2021_ENDPOINT_HEARTRATE, hrPayload, extendedFlags = true, encrypt = true)
+                            for (chunk in hrChunks) {
+                                delay(35L)
+                                writeCharacteristic(BleConstants.UUID_SERVICE_HUAMI, BleConstants.UUID_CHAR_CHUNKED_2021_WRITE, chunk)
+                            }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "Error sending 2021 HR stop chunk", e)
+                        }
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Error in setHeartRateStreamingMode", e)
