@@ -332,6 +332,57 @@ class MiBandBleManager(
         _authStatusDetail.value = "手环未连接"
     }
 
+    /**
+     * Cleanly tears down the stale GATT client and reconnects to recover from
+     * Android Fluoride/Bluedroid mDeviceBusy deadlocks without interrupting ongoing session state.
+     */
+    fun reconnectSilently() {
+        val targetMac = _deviceInfo.value.macAddress
+        val adapter = bluetoothAdapter
+        val targetDevice = bluetoothGatt?.device ?: if (targetMac.isNotBlank()) {
+            try { adapter?.getRemoteDevice(targetMac) } catch (e: Exception) { null }
+        } else null
+
+        if (targetDevice == null) {
+            Log.w(TAG, "reconnectSilently failed: target device is unknown")
+            return
+        }
+
+        Log.i(TAG, "Executing silent GATT reconnect to recover wedged BLE stack for ${targetDevice.address}...")
+        authTimeoutJob?.cancel()
+        authTimeoutJob = null
+        hrKeepAliveJob?.cancel()
+        hrKeepAliveJob = null
+        motionWatchdogJob?.cancel()
+        motionWatchdogJob = null
+        actigraphyTickerJob?.cancel()
+        actigraphyTickerJob = null
+        isHrToggleBusy = false
+
+        descriptorDeferredMap.values.forEach { it.cancel() }
+        descriptorDeferredMap.clear()
+        characteristicWriteDeferredMap.values.forEach { it.cancel() }
+        characteristicWriteDeferredMap.clear()
+
+        bluetoothGatt?.let { gatt ->
+            try {
+                gatt.disconnect()
+                gatt.close()
+            } catch (e: Exception) {
+                Log.e(TAG, "Error closing stale GATT in reconnectSilently", e)
+            }
+        }
+        bluetoothGatt = null
+        _connectionState.value = BleConnectionState.CONNECTING
+        _authStatusDetail.value = "静默恢复链路：正在重连手环..."
+
+        scope.launch(Dispatchers.Main) {
+            delay(1000L)
+            Log.i(TAG, "Reconnecting GATT to ${targetDevice.address} after clean close")
+            bluetoothGatt = targetDevice.connectGatt(context, false, gattCallback, BluetoothDevice.TRANSPORT_LE)
+        }
+    }
+
     private val gattCallback = object : BluetoothGattCallback() {
         override fun onConnectionStateChange(gatt: BluetoothGatt?, status: Int, newState: Int) {
             Log.d(TAG, "onConnectionStateChange status=$status, newState=$newState")
@@ -524,11 +575,19 @@ class MiBandBleManager(
 
                 gatt?.requestMtu(512)
 
-                // Subscribe HR notifications on auth ready (keep sensor stream idle for low-power standby)
+                // Subscribe HR notifications on auth ready & auto-restore active streaming if in session
                 scope.launch(Dispatchers.IO) {
                     delay(250L)
                     gatt?.let { g ->
                         subscribeHeartRate(g)
+                        if (_deviceMetrics.value.isHrStreaming) {
+                            delay(150L)
+                            setHeartRateStreamingMode(true, force = true)
+                        }
+                        if (_deviceMetrics.value.isMotionStreaming) {
+                            delay(150L)
+                            enableSensorNotifications(g, resetBaseline = false)
+                        }
                     }
                 }
             }
@@ -601,11 +660,19 @@ class MiBandBleManager(
                         // Request MTU now after auth to optimize sensor data throughput
                         bluetoothGatt?.requestMtu(512)
 
-                        // Subscribe HR notifications on auth ready (keep sensor stream idle for low-power standby)
+                        // Subscribe HR notifications on auth ready & auto-restore active streaming if in session
                         scope.launch(Dispatchers.IO) {
                             delay(250L)
                             bluetoothGatt?.let { g ->
                                 subscribeHeartRate(g)
+                                if (_deviceMetrics.value.isHrStreaming) {
+                                    delay(150L)
+                                    setHeartRateStreamingMode(true, force = true)
+                                }
+                                if (_deviceMetrics.value.isMotionStreaming) {
+                                    delay(150L)
+                                    enableSensorNotifications(g, resetBaseline = false)
+                                }
                             }
                         }
                     }
@@ -679,9 +746,9 @@ class MiBandBleManager(
     fun startHrKeepAlive(gatt: BluetoothGatt) {
         hrKeepAliveJob?.cancel()
         hrKeepAliveJob = scope.launch(Dispatchers.IO) {
-            Log.i(TAG, "Heart rate keepalive ping started (12s interval to 0x2A39)")
+            Log.i(TAG, "Heart rate keepalive ping started (20s interval to 0x2A39)")
             while (isActive && _connectionState.value == BleConnectionState.CONNECTED && _deviceMetrics.value.isHrStreaming) {
-                delay(12000L)
+                delay(20000L)
                 if (!_deviceMetrics.value.isHrStreaming) break
                 var hrService = gatt.getService(BleConstants.UUID_SERVICE_HEART_RATE)
                 var hrCtrlChar = hrService?.getCharacteristic(BleConstants.UUID_CHAR_HEART_RATE_CONTROL)
@@ -692,7 +759,10 @@ class MiBandBleManager(
                     }
                 }
                 if (hrCtrlChar != null) {
-                    writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_PING_KEEPALIVE)
+                    val success = writeCharacteristicSequential(gatt, hrCtrlChar, BleConstants.HR_PING_KEEPALIVE)
+                    if (!success) {
+                        Log.w(TAG, "Heart rate keepalive ping sequential write unacknowledged or rejected")
+                    }
                 }
             }
             Log.i(TAG, "Heart rate keepalive ping stopped.")
@@ -1025,11 +1095,11 @@ class MiBandBleManager(
         }
     }
 
-    fun setHeartRateStreamingMode(isContinuous: Boolean) {
-        if (_deviceMetrics.value.isHrStreaming == isContinuous) {
+    fun setHeartRateStreamingMode(isContinuous: Boolean, force: Boolean = false) {
+        if (!force && _deviceMetrics.value.isHrStreaming == isContinuous) {
             return
         }
-        if (isHrToggleBusy) {
+        if (isHrToggleBusy && !force) {
             Log.w(TAG, "setHeartRateStreamingMode: toggle busy, skipping rapid invocation")
             return
         }

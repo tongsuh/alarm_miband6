@@ -258,10 +258,19 @@ class SleepGuardService : Service() {
 
                 _liveStaging.value = stagingResult
 
-                // Maintain continuous 1Hz heart rate streaming throughout all sleep phases
-                // to guarantee baseline tracking and continuous hypnogram data
-                if (!app.bleManager.deviceMetrics.value.isHrStreaming && app.bleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
-                    app.bleManager.setHeartRateStreamingMode(true)
+                // Maintain continuous 1Hz heart rate streaming throughout all sleep phases & Watchdog recovery
+                val hrIdleMs = if (lastHeartRateReceivedTimeMs > 0L) now - lastHeartRateReceivedTimeMs else 0L
+                if (_isServiceRunning.value && app.bleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
+                    if (hrIdleMs > 75000L) {
+                        Log.e(TAG, "Heart rate stream stalled for ${hrIdleMs}ms (>75s). Underlying GATT client appears locked. Triggering silent reconnect...")
+                        lastHeartRateReceivedTimeMs = now // Reset baseline while reconnect is in progress
+                        app.bleManager.reconnectSilently()
+                    } else if (hrIdleMs > 45000L) {
+                        Log.w(TAG, "Heart rate stream quiet for ${hrIdleMs}ms (>45s). Stage 1 recovery: sending soft refresh...")
+                        app.bleManager.setHeartRateStreamingMode(true, force = true)
+                    } else if (!app.bleManager.deviceMetrics.value.isHrStreaming) {
+                        app.bleManager.setHeartRateStreamingMode(true, force = true)
+                    }
                 }
 
                 // Record epoch in DB (record peak actigraphy so movement spikes are faithfully captured)

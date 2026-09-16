@@ -103,7 +103,7 @@ class UserPreferencesRepository(context: Context) {
             stage2HrSampleRateSeconds = prefs.getInt(KEY_STAGE2_HR_SEC, 1),
             cooldownMinutes = prefs.getInt(KEY_COOLDOWN_MIN, 20),
             enableAudioVerification = prefs.getBoolean(KEY_ENABLE_AUDIO_VERIFY, true),
-            confidenceThreshold = prefs.getFloat(KEY_CONFIDENCE_THRESHOLD, 0.85f)
+            confidenceThreshold = prefs.getFloat(KEY_CONFIDENCE_THRESHOLD, 0.72f).let { if (it >= 0.849f && it <= 0.851f) 0.72f else it }
         )
     }
 

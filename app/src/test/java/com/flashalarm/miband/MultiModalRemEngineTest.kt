@@ -46,6 +46,38 @@ class MultiModalRemEngineTest {
     }
 
     @Test
+    fun `test micro-movement does not veto dream cue or flip REM stage`() {
+        engine.markSleepOnset(0L)
+        val remTimeMs = 80 * 60 * 1000L
+
+        // Feed strong REM physiological signals
+        for (i in 0 until 12) {
+            val hrVar = if (i % 2 == 0) 75 else 68
+            engine.evaluateEpoch(
+                heartRate = hrVar,
+                actigraphyMagnitude = 0.008f,
+                audioIrregularity = 0.65f,
+                isAudioReliable = true,
+                currentTimeMs = remTimeMs + (i * 1000L)
+            )
+        }
+
+        // Simulate isolated micro-twitch (peak spike 0.22g, but epoch average actigraphy is low 0.03g)
+        val microResult = engine.evaluateEpoch(
+            heartRate = 74,
+            actigraphyMagnitude = 0.03f,
+            peakActigraphy = 0.22f,
+            audioIrregularity = 0.65f,
+            isAudioReliable = true,
+            currentTimeMs = remTimeMs + 20000L
+        )
+
+        assertEquals(SleepStage.REM, microResult.stage)
+        assertFalse("Micro movement must NOT veto cue trigger", microResult.isVetoedByMovement)
+        assertTrue("Dream cue should still be triggerable during micro-twitch", microResult.isDreamCueTriggered)
+    }
+
+    @Test
     fun `test sleep onset window protection - suppresses cue before 70 minutes`() {
         engine.markSleepOnset(0L)
         // Fast-forward 30 minutes after onset (under 70 minutes)

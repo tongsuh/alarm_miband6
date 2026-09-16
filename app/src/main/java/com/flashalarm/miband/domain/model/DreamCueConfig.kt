@@ -43,7 +43,7 @@ data class DreamCueConfig(
     // 4. Algorithm & Safety
     val cooldownMinutes: Int = 20,
     val enableAudioVerification: Boolean = true,
-    val confidenceThreshold: Float = 0.85f
+    val confidenceThreshold: Float = 0.72f
 ) {
     fun getActivePattern(): CustomizableVibrationPattern {
         return patterns.firstOrNull { it.id == activePatternId } ?: patterns.first()

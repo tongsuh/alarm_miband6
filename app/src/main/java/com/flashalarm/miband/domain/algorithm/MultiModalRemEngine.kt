@@ -35,8 +35,11 @@ class MultiModalRemEngine(
     private var bedtimeBaselineHr: Float = 0.0f
     private var bedtimeSamplesCount: Int = 0
 
-    // Transient arousal cooldown (1 epoch ~ 30s) after movement veto
-    private var movementArousalCooldown: Int = 0
+    // Movement classification and stage hysteresis state
+    private var consecutiveMovingEpochs: Int = 0
+    private var lastEstablishedStage: SleepStage = SleepStage.AWAKE
+    private var pendingStage: SleepStage? = null
+    private var pendingStageCount: Int = 0
 
     fun updateConfig(config: DreamCueConfig) {
         this.cueConfig = config
@@ -56,7 +59,10 @@ class MultiModalRemEngine(
         deepSleepBaselineHr = 60.0f
         bedtimeBaselineHr = 0.0f
         bedtimeSamplesCount = 0
-        movementArousalCooldown = 0
+        consecutiveMovingEpochs = 0
+        lastEstablishedStage = SleepStage.AWAKE
+        pendingStage = null
+        pendingStageCount = 0
     }
 
     /**
@@ -100,19 +106,30 @@ class MultiModalRemEngine(
             if (recentAudioIrregularities.size > 30) recentAudioIrregularities.removeFirst()
         }
 
-        // 2. Wrist Actigraphy: Muscle Atonia & Dynamic VETO Trigger
-        // Fixed: Do NOT veto for 30 minutes based on historical peak! Veto only current moving epoch + 1 cooldown epoch (1 min total)
-        val isCurrentEpochMoving = peakActigraphy > 0.18f || actigraphyMagnitude > 0.14f
-        if (isCurrentEpochMoving) {
-            movementArousalCooldown = 1
-        } else if (movementArousalCooldown > 0) {
-            movementArousalCooldown--
-        }
-        val isVetoedByMovement = isCurrentEpochMoving || movementArousalCooldown > 0
-
+        // 2. Wrist Actigraphy: Muscle Atonia & Awakening Detection
         val avgMovement = if (recentActigraphy.isNotEmpty()) recentActigraphy.average().toFloat() else actigraphyMagnitude
         // Atonia score: 1.0 when completely motionless (<0.015g), drops toward 0 when moving
         val atoniaScore = (1.0f - (avgMovement / 0.08f)).coerceIn(0.0f, 1.0f)
+
+        // Movement Classification:
+        // A. Gross sustained movement within current epoch (e.g. rollover or sitting up):
+        val isGrossMovement = actigraphyMagnitude >= 0.14f || avgMovement > 0.18f
+        // B. Any movement spike (including brief micro-twitch):
+        val isAnyMovement = peakActigraphy > 0.18f || actigraphyMagnitude > 0.08f
+
+        if (isAnyMovement) {
+            consecutiveMovingEpochs++
+        } else {
+            consecutiveMovingEpochs = 0
+        }
+
+        // True Awakening requires sustained gross movement OR consecutive active movement across >= 2 epochs (>= 60s)
+        val isSustainedAwake = isGrossMovement || consecutiveMovingEpochs >= 2
+
+        // Per user requirement:
+        // Micro-movements (transient twitches where peak > 0.18f but gross average is low and non-consecutive)
+        // DO NOT veto dream cue vibrations! Only sustained awakening vetoes vibration.
+        val isVetoedByMovement = isSustainedAwake
 
         // 3. Autonomic PPG Heart Rate & Dispersion
         val shortTermMeanHr = if (shortTermHeartRates.isNotEmpty()) shortTermHeartRates.average().toFloat() else heartRate.toFloat()
@@ -194,21 +211,21 @@ class MultiModalRemEngine(
         val elapsedMinutes = if (isSleepOnsetDetected) elapsedSinceOnsetMs / 60000f else 0f
         val ultradianPrior = if (isSleepOnsetDetected) calculateUltradianRemPrior(elapsedMinutes) else 0.05f
 
-        // 7. Staging Decision
-        var determinedStage = SleepStage.AWAKE
-        var remConfidence = 0.0f
-
+        // 7. Staging Decision & 3-Epoch Temporal Hysteresis Filter
         // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
         val isAutonomicSurge = (hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
                 (hrSurgePercent >= 0.11f) ||
                 (combinedDispersion >= 2.0f && hrSurgePercent >= 0.04f)
 
-        if (isVetoedByMovement || avgMovement > 0.20f) {
-            determinedStage = SleepStage.AWAKE
-            remConfidence = 0.0f
+        var tentativeStage: SleepStage
+        var tentativeRemConfidence = 0.0f
+
+        if (isSustainedAwake) {
+            tentativeStage = SleepStage.AWAKE
+            tentativeRemConfidence = 0.0f
         } else if (atoniaScore > 0.70f) {
             if (isAutonomicSurge) {
-                determinedStage = SleepStage.REM
+                tentativeStage = SleepStage.REM
 
                 // Sensor raw score (Atonia 35%, Surge 40%, Dispersion 25%)
                 val wristScore = (atoniaScore * 0.35f) +
@@ -222,26 +239,62 @@ class MultiModalRemEngine(
                 }
 
                 // Soft Prior Bayesian Fusion: 78% Physical Sensors + 22% Ultradian Cycle Prior
-                remConfidence = ((multiModalSensorScore * 0.78f) + (ultradianPrior * 0.22f)).coerceIn(0.0f, 1.0f)
+                tentativeRemConfidence = ((multiModalSensorScore * 0.78f) + (ultradianPrior * 0.22f)).coerceIn(0.0f, 1.0f)
 
                 // Ground-truth override: If physical sensor evidence is overwhelming, do not let prior suppress it
                 if (multiModalSensorScore >= 0.85f) {
-                    remConfidence = kotlin.math.max(remConfidence, multiModalSensorScore)
+                    tentativeRemConfidence = kotlin.math.max(tentativeRemConfidence, multiModalSensorScore)
                 }
             } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f) {
-                determinedStage = SleepStage.DEEP
-                remConfidence = 0.0f
+                tentativeStage = SleepStage.DEEP
+                tentativeRemConfidence = 0.0f
             } else {
-                determinedStage = SleepStage.LIGHT
-                remConfidence = 0.12f * ultradianPrior
+                tentativeStage = SleepStage.LIGHT
+                tentativeRemConfidence = 0.12f * ultradianPrior
             }
         } else {
-            determinedStage = SleepStage.LIGHT
-            remConfidence = 0.05f
+            tentativeStage = if (avgMovement > 0.16f) SleepStage.AWAKE else SleepStage.LIGHT
+            tentativeRemConfidence = 0.05f
         }
 
-        if (isVetoedByMovement) {
-            remConfidence = 0.0f
+        // 3-Epoch Temporal Hysteresis Filter:
+        // Eliminates 1-minute isolated chattering between stages (e.g. 1m AWAKE next to 1m REM)
+        val determinedStage: SleepStage
+        if (isSustainedAwake) {
+            lastEstablishedStage = SleepStage.AWAKE
+            pendingStage = null
+            pendingStageCount = 0
+            determinedStage = SleepStage.AWAKE
+        } else if (tentativeStage == lastEstablishedStage) {
+            pendingStage = null
+            pendingStageCount = 0
+            determinedStage = lastEstablishedStage
+        } else {
+            if (pendingStage == tentativeStage) {
+                pendingStageCount++
+                if (pendingStageCount >= 2) {
+                    // Confirmed transition across 2 consecutive epochs (60s)
+                    lastEstablishedStage = tentativeStage
+                    pendingStage = null
+                    pendingStageCount = 0
+                    determinedStage = tentativeStage
+                } else {
+                    // Hold established stage for 1 epoch to smooth away transient artifacts
+                    determinedStage = lastEstablishedStage
+                }
+            } else {
+                pendingStage = tentativeStage
+                pendingStageCount = 1
+                determinedStage = lastEstablishedStage
+            }
+        }
+
+        val remConfidence = if (determinedStage == SleepStage.REM) {
+            if (tentativeStage == SleepStage.REM) tentativeRemConfidence else 0.72f
+        } else if (determinedStage == SleepStage.AWAKE) {
+            0.0f
+        } else {
+            tentativeRemConfidence.coerceAtMost(0.15f)
         }
 
         // 8. Lucid Dream Cueing Eligibility & Cooldown
