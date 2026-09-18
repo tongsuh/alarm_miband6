@@ -145,6 +145,7 @@ fun SleepModeScreen(
     val metrics by app.bleManager.deviceMetrics.collectAsState()
     val audioState by app.audioAnalyzer.state.collectAsState()
     val liveStaging by SleepGuardService.liveStaging.collectAsState()
+    val activeCue by SleepGuardService.activeCue.collectAsState()
 
     var currentTimeStr by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
@@ -177,6 +178,10 @@ fun SleepModeScreen(
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null
             ) {
+                // If a dream cue is active, tapping anywhere dismisses the cue and confirms consciousness
+                if (activeCue != null && !activeCue!!.isAcknowledged) {
+                    SleepGuardService.acknowledgeActiveCue(app)
+                }
                 isAwakeBrightness = true
             }
             .statusBarsPadding()
@@ -233,17 +238,20 @@ fun SleepModeScreen(
 
             Spacer(modifier = Modifier.height(20.dp))
 
-            // Relative Sleep Phase Status Pill
+            // Relative Sleep Phase & Active Cue Status Pill
             val currentPhase = liveStaging?.sessionPhase ?: SleepSessionPhase.DETECTING_ONSET
-            val phaseColor = when (currentPhase) {
-                SleepSessionPhase.DETECTING_ONSET -> DarkTextSecondary
-                SleepSessionPhase.PROTECTION_PERIOD -> MiBandCyan
-                SleepSessionPhase.DREAM_WINDOW_ACTIVE -> GoldDream
+            val phaseColor = when {
+                activeCue != null -> GoldDream
+                currentPhase == SleepSessionPhase.DETECTING_ONSET -> DarkTextSecondary
+                currentPhase == SleepSessionPhase.PROTECTION_PERIOD -> MiBandCyan
+                else -> GoldDream
             }
-            val phaseText = when (currentPhase) {
-                SleepSessionPhase.DETECTING_ONSET -> "🌙 正在监测入睡状态 (静息沉淀中...)"
-                SleepSessionPhase.PROTECTION_PERIOD -> "🛡️ 前半夜深睡保护期 (剩余 ${liveStaging?.protectionRemainingMinutes ?: 0} 分钟)"
-                SleepSessionPhase.DREAM_WINDOW_ACTIVE -> "✨ REM触梦雷达已全开 (命中即下发)"
+            val phaseText = when {
+                activeCue?.isAcknowledged == true -> "🌟 意识触梦成功！已感知梦境并停止提醒"
+                activeCue != null -> "✨ 触梦提醒中 · 轻触屏幕任意位置确认已感知"
+                currentPhase == SleepSessionPhase.DETECTING_ONSET -> "🌙 正在监测入睡状态 (静息沉淀中...)"
+                currentPhase == SleepSessionPhase.PROTECTION_PERIOD -> "🛡️ 前半夜深睡保护期 (剩余 ${liveStaging?.protectionRemainingMinutes ?: 0} 分钟)"
+                else -> "✨ REM触梦雷达已全开 (命中即下发)"
             }
 
             Box(

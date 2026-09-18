@@ -112,23 +112,29 @@ class MultiModalRemEngine(
         val atoniaScore = (1.0f - (avgMovement / 0.08f)).coerceIn(0.0f, 1.0f)
 
         // Movement Classification:
-        // A. Gross sustained movement within current epoch (e.g. rollover or sitting up):
-        val isGrossMovement = actigraphyMagnitude >= 0.14f || avgMovement > 0.18f
-        // B. Any movement spike (including brief micro-twitch):
+        // A. Any movement spike (including brief micro-twitch):
         val isAnyMovement = peakActigraphy > 0.18f || actigraphyMagnitude > 0.08f
-
         if (isAnyMovement) {
             consecutiveMovingEpochs++
         } else {
             consecutiveMovingEpochs = 0
         }
 
-        // True Awakening requires sustained gross movement OR consecutive active movement across >= 2 epochs (>= 60s)
-        val isSustainedAwake = isGrossMovement || consecutiveMovingEpochs >= 2
+        // B. Vigorous waking movement (e.g. sitting up, getting out of bed):
+        // High acceleration (>=0.30g) accompanied by elevated wake heart rate (>=72 bpm or >=20% surge), or extreme movement (>=0.45g)
+        val isVigorousWakeMovement = (actigraphyMagnitude >= 0.30f && (heartRate >= 72 || (deepSleepBaselineHr > 0 && (heartRate - deepSleepBaselineHr) / deepSleepBaselineHr >= 0.20f))) ||
+                actigraphyMagnitude >= 0.45f
+
+        // C. Sustained macroscopic movement across epochs (>= 2 epochs with movement or multi-minute elevated average):
+        val isSustainedMovement = (consecutiveMovingEpochs >= 2 && actigraphyMagnitude >= 0.10f) ||
+                consecutiveMovingEpochs >= 3 ||
+                avgMovement > 0.18f
+
+        // True Awakening requires either vigorous waking movement or sustained movement across epochs:
+        val isSustainedAwake = isVigorousWakeMovement || isSustainedMovement
 
         // Per user requirement:
-        // Micro-movements (transient twitches where peak > 0.18f but gross average is low and non-consecutive)
-        // DO NOT veto dream cue vibrations! Only sustained awakening vetoes vibration.
+        // Micro-movements / normal isolated rollovers DO NOT veto dream cue vibrations! Only sustained awakening vetoes vibration.
         val isVetoedByMovement = isSustainedAwake
 
         // 3. Autonomic PPG Heart Rate & Dispersion
@@ -253,14 +259,26 @@ class MultiModalRemEngine(
                 tentativeRemConfidence = 0.12f * ultradianPrior
             }
         } else {
-            tentativeStage = if (avgMovement > 0.16f) SleepStage.AWAKE else SleepStage.LIGHT
+            tentativeStage = if (avgMovement > 0.18f || consecutiveMovingEpochs >= 2) SleepStage.AWAKE else SleepStage.LIGHT
             tentativeRemConfidence = 0.05f
         }
 
         // 3-Epoch Temporal Hysteresis Filter:
         // Eliminates 1-minute isolated chattering between stages (e.g. 1m AWAKE next to 1m REM)
         val determinedStage: SleepStage
-        if (isSustainedAwake) {
+        if (isVigorousWakeMovement) {
+            // Immediate vigorous waking action (e.g. sitting up in bed): output AWAKE for this epoch
+            determinedStage = SleepStage.AWAKE
+            if (consecutiveMovingEpochs >= 2) {
+                lastEstablishedStage = SleepStage.AWAKE
+                pendingStage = null
+                pendingStageCount = 0
+            } else {
+                pendingStage = SleepStage.AWAKE
+                pendingStageCount = 1
+            }
+        } else if (isSustainedMovement) {
+            // Confirmed sustained movement across >= 2 epochs
             lastEstablishedStage = SleepStage.AWAKE
             pendingStage = null
             pendingStageCount = 0

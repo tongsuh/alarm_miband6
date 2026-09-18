@@ -248,4 +248,43 @@ class MultiModalRemEngineTest {
 
         assertTrue("Sleep onset should be confirmed after 16 sustained still epochs with HR dip", finalResult.isSleepOnsetDetected)
     }
+
+    @Test
+    fun `test normal rollover does not poison subsequent epochs into awake`() {
+        engine.markSleepOnset(0L)
+        val remTimeMs = 80 * 60 * 1000L
+
+        // Feed sustained REM signals
+        for (i in 0 until 10) {
+            val hrVar = if (i % 2 == 0) 74 else 68
+            engine.evaluateEpoch(
+                heartRate = hrVar,
+                actigraphyMagnitude = 0.008f,
+                audioIrregularity = 0.65f,
+                isAudioReliable = true,
+                currentTimeMs = remTimeMs + (i * 30000L)
+            )
+        }
+
+        // Simulate 1 normal bed rollover epoch (0.16g, resting heart rate 64 bpm)
+        val rolloverEpoch = engine.evaluateEpoch(
+            heartRate = 64,
+            actigraphyMagnitude = 0.16f,
+            peakActigraphy = 0.25f,
+            currentTimeMs = remTimeMs + (10 * 30000L)
+        )
+        // Stage during rollover remains REM or LIGHT via hysteresis, never forced to AWAKE
+        assertTrue("Rollover should not be scored as AWAKE", rolloverEpoch.stage != SleepStage.AWAKE)
+
+        // Immediately following epoch: user is back still in REM
+        val nextEpoch = engine.evaluateEpoch(
+            heartRate = 72,
+            actigraphyMagnitude = 0.008f,
+            audioIrregularity = 0.65f,
+            isAudioReliable = true,
+            currentTimeMs = remTimeMs + (11 * 30000L)
+        )
+        // Must stay in REM, not artificially dragged into AWAKE
+        assertEquals("Subsequent epoch must remain REM", SleepStage.REM, nextEpoch.stage)
+    }
 }

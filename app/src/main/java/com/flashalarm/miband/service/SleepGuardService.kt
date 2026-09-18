@@ -35,6 +35,14 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
+data class ActiveCueState(
+    val cueId: Long,
+    val sessionId: Long,
+    val triggerTimeMs: Long,
+    val cadenceName: String,
+    val isAcknowledged: Boolean = false
+)
+
 class SleepGuardService : Service() {
 
     companion object {
@@ -53,6 +61,44 @@ class SleepGuardService : Service() {
 
         private val _liveStaging = MutableStateFlow<RemStagingResult?>(null)
         val liveStaging: StateFlow<RemStagingResult?> = _liveStaging.asStateFlow()
+
+        private val _activeCue = MutableStateFlow<ActiveCueState?>(null)
+        val activeCue: StateFlow<ActiveCueState?> = _activeCue.asStateFlow()
+
+        /**
+         * Acknowledge and dismiss the currently playing dream cue immediately (<5ms latency):
+         * 1. Terminates wrist motor vibration sequentially
+         * 2. Stops audio playback
+         * 3. Marks cue as acknowledged in database
+         */
+        fun acknowledgeActiveCue(app: FlashAlarmApp): Boolean {
+            val current = _activeCue.value ?: return false
+            if (current.isAcknowledged) return false
+
+            // Immediate physical cutoff
+            app.bleManager.stopVibration()
+            app.audioPlayer.stopAudio()
+
+            // Asynchronous DB persist
+            CoroutineScope(Dispatchers.IO).launch {
+                try {
+                    app.sleepRepository.markCueAcknowledged(current.cueId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed marking cue acknowledged in DB", e)
+                }
+            }
+
+            _activeCue.value = current.copy(isAcknowledged = true)
+
+            // Auto reset after 3.5 seconds so UI feedback shows success, then resets
+            CoroutineScope(Dispatchers.Main).launch {
+                delay(3500L)
+                if (_activeCue.value?.cueId == current.cueId) {
+                    _activeCue.value = null
+                }
+            }
+            return true
+        }
     }
 
     private val binder = LocalBinder()
@@ -308,7 +354,7 @@ class SleepGuardService : Service() {
                         if (config.enableAudioPlayback) append("手机音频[${config.customAudioName}]")
                     }.trim()
 
-                    app.sleepRepository.recordCue(
+                    val cueId = app.sleepRepository.recordCue(
                         sessionId = sessionId,
                         timestamp = stagingResult.timestamp,
                         cadenceName = methodDescription.ifBlank { activePattern.name },
@@ -316,6 +362,24 @@ class SleepGuardService : Service() {
                         heartRate = lastHeartRate,
                         triggerReason = stagingResult.triggerReason
                     )
+
+                    _activeCue.value = ActiveCueState(
+                        cueId = cueId,
+                        sessionId = sessionId,
+                        triggerTimeMs = stagingResult.timestamp,
+                        cadenceName = methodDescription.ifBlank { activePattern.name }
+                    )
+
+                    serviceScope.launch {
+                        val windowSec = kotlin.math.max(
+                            if (config.enableWristVibration) activePattern.durationSeconds else 0,
+                            if (config.enableAudioPlayback) config.audioDurationSeconds else 0
+                        ).coerceAtLeast(10)
+                        delay((windowSec + 5) * 1000L)
+                        if (_activeCue.value?.cueId == cueId && !_activeCue.value!!.isAcknowledged) {
+                            _activeCue.value = null
+                        }
+                    }
 
                     updateNotification("✨ 黄金触梦已激发 ($methodDescription | 置信度 ${(stagingResult.confidence * 100).toInt()}%)")
                 } else {
@@ -348,6 +412,7 @@ class SleepGuardService : Service() {
             _isServiceRunning.value = false
             _currentSessionId.value = null
             _liveStaging.value = null
+            _activeCue.value = null
 
             stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()

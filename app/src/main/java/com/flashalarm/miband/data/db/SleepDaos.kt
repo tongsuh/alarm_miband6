@@ -57,6 +57,9 @@ interface DreamCueDao {
     @Query("SELECT COUNT(*) FROM dream_cues WHERE sessionId = :sessionId")
     suspend fun getCueCountForSession(sessionId: Long): Int
 
+    @Query("UPDATE dream_cues SET acknowledged = 1 WHERE cueId = :cueId")
+    suspend fun markCueAcknowledged(cueId: Long)
+
     @Query("DELETE FROM dream_cues WHERE sessionId = :sessionId")
     suspend fun deleteCuesForSession(sessionId: Long)
 }

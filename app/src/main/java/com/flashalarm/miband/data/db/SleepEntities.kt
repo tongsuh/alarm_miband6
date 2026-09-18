@@ -50,5 +50,6 @@ data class DreamCueEntity(
     val cadenceName: String,
     val confidence: Float,
     val heartRate: Int,
-    val triggerReason: String
+    val triggerReason: String,
+    val acknowledged: Boolean = false
 )

@@ -510,8 +510,9 @@ private fun LucidDreamCueSummaryCard(
                     )
                 }
 
+                val ackCount = cues.count { it.acknowledged }
                 Text(
-                    text = "共击发 ${cues.size} 次",
+                    text = if (ackCount > 0) "共击发 ${cues.size} 次 · 意识唤醒 $ackCount 次" else "共击发 ${cues.size} 次",
                     fontSize = 12.sp,
                     fontWeight = FontWeight.Bold,
                     color = GoldDream
@@ -556,6 +557,22 @@ private fun LucidDreamCueSummaryCard(
                                         fontSize = 11.sp,
                                         color = GoldDream
                                     )
+                                    if (cue.acknowledged) {
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Box(
+                                            modifier = Modifier
+                                                .clip(RoundedCornerShape(4.dp))
+                                                .background(GoldDream.copy(alpha = 0.2f))
+                                                .padding(horizontal = 4.dp, vertical = 2.dp)
+                                        ) {
+                                            Text(
+                                                text = "✨ 意识唤醒成功",
+                                                fontSize = 9.sp,
+                                                fontWeight = FontWeight.Bold,
+                                                color = GoldDream
+                                            )
+                                        }
+                                    }
                                 }
                                 Text(
                                     text = cue.triggerReason,

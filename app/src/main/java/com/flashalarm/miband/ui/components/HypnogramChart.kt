@@ -197,8 +197,9 @@ fun HypnogramChart(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
+                        val ackText = if (matchedCue.acknowledged) " (意识唤醒成功)" else ""
                         Text(
-                            text = "⭐ 触梦时刻 · ${timeFormat.format(Date(matchedCue.timestamp))}",
+                            text = "⭐ 触梦时刻 · ${timeFormat.format(Date(matchedCue.timestamp))}$ackText",
                             color = GoldDream,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.Bold
@@ -376,8 +377,8 @@ fun HypnogramChart(
                     val cx = fraction * width
                     val remY = stageY.getValue(SleepStage.REM)
 
-                    // Draw golden star / diamond marker
-                    drawDreamStar(cx, remY)
+                    // Draw golden star / diamond marker with awareness ring if acknowledged
+                    drawDreamStar(cx, remY, cue.acknowledged)
                 }
 
                 // 4. Scrubbing Crosshair & Glowing Tracking Dot
@@ -431,20 +432,32 @@ fun HypnogramChart(
     }
 }
 
-private fun DrawScope.drawDreamStar(cx: Float, cy: Float) {
+private fun DrawScope.drawDreamStar(cx: Float, cy: Float, acknowledged: Boolean = false) {
+    if (acknowledged) {
+        // Outer halo ring for confirmed consciousness awareness
+        drawCircle(
+            color = GoldDream.copy(alpha = 0.55f),
+            radius = 14f,
+            center = Offset(cx, cy),
+            style = Stroke(width = 1.5f)
+        )
+    }
+
     // Halo glow
     drawCircle(
-        color = GoldDream.copy(alpha = 0.4f),
-        radius = 10f,
+        color = GoldDream.copy(alpha = if (acknowledged) 0.5f else 0.35f),
+        radius = if (acknowledged) 11f else 9f,
         center = Offset(cx, cy)
     )
 
     // 4-pointed diamond star
+    val starR = if (acknowledged) 9f else 7f
+    val starW = if (acknowledged) 4.5f else 3.5f
     val starPath = Path().apply {
-        moveTo(cx, cy - 8f)
-        lineTo(cx + 4f, cy)
-        lineTo(cx, cy + 8f)
-        lineTo(cx - 4f, cy)
+        moveTo(cx, cy - starR)
+        lineTo(cx + starW, cy)
+        lineTo(cx, cy + starR)
+        lineTo(cx - starW, cy)
         close()
     }
     drawPath(starPath, GoldDream, style = Fill)

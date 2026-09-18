@@ -80,29 +80,38 @@ class SleepRepository(
         confidence: Float,
         heartRate: Int,
         triggerReason: String
-    ) = withContext(Dispatchers.IO) {
+    ): Long = withContext(Dispatchers.IO) {
         val cue = DreamCueEntity(
             sessionId = sessionId,
             timestamp = timestamp,
             cadenceName = cadenceName,
             confidence = confidence,
             heartRate = heartRate,
-            triggerReason = triggerReason
+            triggerReason = triggerReason,
+            acknowledged = false
         )
         cueDao.insertCue(cue)
+    }
+
+    suspend fun markCueAcknowledged(cueId: Long) = withContext(Dispatchers.IO) {
+        cueDao.markCueAcknowledged(cueId)
     }
 
     suspend fun finalizeSession(sessionId: Long, endTimeMs: Long = System.currentTimeMillis()) =
         withContext(Dispatchers.IO) {
             val session = sessionDao.getSessionById(sessionId) ?: return@withContext
-            val epochs = epochDao.getEpochsListForSession(sessionId)
+            val rawEpochs = epochDao.getEpochsListForSession(sessionId)
             val cueCount = cueDao.getCueCountForSession(sessionId)
 
-            val totalEpochs = epochs.size
+            val totalEpochs = rawEpochs.size
             if (totalEpochs == 0) {
                 sessionDao.deleteSession(sessionId)
                 return@withContext
             }
+
+            // Apply AASM epoch smoothing to eliminate isolated 30s/1m pseudo-awakenings while preserving raw sensor metrics
+            val epochs = smoothEpochs(rawEpochs)
+            epochDao.insertEpochs(epochs)
 
             // Each epoch is exactly 30 seconds (0.5 minutes)
             var awakeCount = 0
@@ -158,6 +167,47 @@ class SleepRepository(
             )
             sessionDao.updateSession(updatedSession)
         }
+
+    /**
+     * AASM-aligned Post-hoc Sleep Staging Smoothing Filter:
+     * Eliminates transient 1-2 epoch (30s-60s) artificial AWAKE spikes embedded inside stable sleep stages
+     * when heart rate remained at nocturnal baseline (<78 bpm), preserving true awakenings.
+     */
+    private fun smoothEpochs(epochs: List<SleepEpochEntity>): List<SleepEpochEntity> {
+        if (epochs.size < 3) return epochs
+        val smoothed = epochs.map { it.copy() }.toMutableList()
+
+        // Pass 1: 1-epoch (30s) isolated AWAKE sandwiched between same sleep stage (e.g. REM - AWAKE - REM)
+        for (i in 1 until smoothed.size - 1) {
+            val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+            val curr = SleepStage.fromCode(smoothed[i].stage)
+            val next = SleepStage.fromCode(smoothed[i + 1].stage)
+
+            if (curr == SleepStage.AWAKE && prev == next && prev != SleepStage.AWAKE) {
+                if (smoothed[i].heartRate < 78) {
+                    smoothed[i] = smoothed[i].copy(stage = prev.code)
+                }
+            }
+        }
+
+        // Pass 2: 2-epoch (60s) isolated AWAKE sandwiched inside prolonged REM or DEEP sleep
+        for (i in 1 until smoothed.size - 2) {
+            val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+            val curr1 = SleepStage.fromCode(smoothed[i].stage)
+            val curr2 = SleepStage.fromCode(smoothed[i + 1].stage)
+            val next = SleepStage.fromCode(smoothed[i + 2].stage)
+
+            if (curr1 == SleepStage.AWAKE && curr2 == SleepStage.AWAKE &&
+                prev == next && (prev == SleepStage.REM || prev == SleepStage.DEEP) &&
+                smoothed[i].heartRate < 76 && smoothed[i + 1].heartRate < 76
+            ) {
+                smoothed[i] = smoothed[i].copy(stage = prev.code)
+                smoothed[i + 1] = smoothed[i + 1].copy(stage = prev.code)
+            }
+        }
+
+        return smoothed
+    }
 
     suspend fun deleteSession(sessionId: Long) = withContext(Dispatchers.IO) {
         cueDao.deleteCuesForSession(sessionId)
@@ -259,7 +309,8 @@ class SleepRepository(
                 cadenceName = "双击-停顿-长震",
                 confidence = 0.96f,
                 heartRate = 79,
-                triggerReason = "交感风暴+呼吸变浅吻合"
+                triggerReason = "交感风暴+呼吸变浅吻合",
+                acknowledged = true
             )
         )
         cueDao.insertCue(
