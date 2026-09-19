@@ -10,6 +10,7 @@ import com.flashalarm.miband.data.db.SleepSessionEntity
 import com.flashalarm.miband.domain.model.SleepStage
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 import java.util.Random
 
@@ -24,7 +25,7 @@ class SleepRepository(
     val latestSession: Flow<SleepSessionEntity?> = sessionDao.getLatestSession()
 
     fun getEpochsForSession(sessionId: Long): Flow<List<SleepEpochEntity>> =
-        epochDao.getEpochsForSession(sessionId)
+        epochDao.getEpochsForSession(sessionId).map { smoothEpochs(it) }
 
     fun getCuesForSession(sessionId: Long): Flow<List<DreamCueEntity>> =
         cueDao.getCuesForSession(sessionId)
@@ -168,45 +169,79 @@ class SleepRepository(
             sessionDao.updateSession(updatedSession)
         }
 
-    /**
-     * AASM-aligned Post-hoc Sleep Staging Smoothing Filter:
-     * Eliminates transient 1-2 epoch (30s-60s) artificial AWAKE spikes embedded inside stable sleep stages
-     * when heart rate remained at nocturnal baseline (<78 bpm), preserving true awakenings.
-     */
-    private fun smoothEpochs(epochs: List<SleepEpochEntity>): List<SleepEpochEntity> {
-        if (epochs.size < 3) return epochs
-        val smoothed = epochs.map { it.copy() }.toMutableList()
+    companion object {
+        /**
+         * AASM-aligned Sleep Staging Smoothing Filter:
+         * Eliminates transient 1-2 epoch (30s-60s) artificial AWAKE spikes and isolated 1-2 epoch (30s-60s) REM blips,
+         * restoring biologically valid, consolidated sleep architecture.
+         */
+        fun smoothEpochs(epochs: List<SleepEpochEntity>): List<SleepEpochEntity> {
+            if (epochs.size < 4) return epochs
+            val smoothed = epochs.map { it.copy() }.toMutableList()
 
-        // Pass 1: 1-epoch (30s) isolated AWAKE sandwiched between same sleep stage (e.g. REM - AWAKE - REM)
-        for (i in 1 until smoothed.size - 1) {
-            val prev = SleepStage.fromCode(smoothed[i - 1].stage)
-            val curr = SleepStage.fromCode(smoothed[i].stage)
-            val next = SleepStage.fromCode(smoothed[i + 1].stage)
+            // Pass 1: Eliminate isolated 1-epoch (30s) and 2-epoch (60s) pseudo-REM blips inside NREM
+            // A biologically valid REM episode requires multi-minute sustained duration (AASM standard).
+            for (i in 1 until smoothed.size - 1) {
+                val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+                val curr = SleepStage.fromCode(smoothed[i].stage)
+                val next = SleepStage.fromCode(smoothed[i + 1].stage)
 
-            if (curr == SleepStage.AWAKE && prev == next && prev != SleepStage.AWAKE) {
-                if (smoothed[i].heartRate < 78) {
-                    smoothed[i] = smoothed[i].copy(stage = prev.code)
+                if (curr == SleepStage.REM && prev != SleepStage.REM && next != SleepStage.REM) {
+                    // Isolated 1-epoch (30s) REM spike -> revert to adjacent NREM stage
+                    val fallback = if (prev == SleepStage.DEEP && next == SleepStage.DEEP) SleepStage.DEEP else SleepStage.LIGHT
+                    smoothed[i] = smoothed[i].copy(stage = fallback.code, confidence = 0.0f)
                 }
             }
-        }
 
-        // Pass 2: 2-epoch (60s) isolated AWAKE sandwiched inside prolonged REM or DEEP sleep
-        for (i in 1 until smoothed.size - 2) {
-            val prev = SleepStage.fromCode(smoothed[i - 1].stage)
-            val curr1 = SleepStage.fromCode(smoothed[i].stage)
-            val curr2 = SleepStage.fromCode(smoothed[i + 1].stage)
-            val next = SleepStage.fromCode(smoothed[i + 2].stage)
+            for (i in 1 until smoothed.size - 2) {
+                val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+                val curr1 = SleepStage.fromCode(smoothed[i].stage)
+                val curr2 = SleepStage.fromCode(smoothed[i + 1].stage)
+                val next = SleepStage.fromCode(smoothed[i + 2].stage)
 
-            if (curr1 == SleepStage.AWAKE && curr2 == SleepStage.AWAKE &&
-                prev == next && (prev == SleepStage.REM || prev == SleepStage.DEEP) &&
-                smoothed[i].heartRate < 76 && smoothed[i + 1].heartRate < 76
-            ) {
-                smoothed[i] = smoothed[i].copy(stage = prev.code)
-                smoothed[i + 1] = smoothed[i + 1].copy(stage = prev.code)
+                if (curr1 == SleepStage.REM && curr2 == SleepStage.REM && prev != SleepStage.REM && next != SleepStage.REM) {
+                    // Isolated 2-epoch (60s = 1 minute) REM blip -> revert to adjacent NREM stage
+                    val fallback = if (prev == SleepStage.DEEP && next == SleepStage.DEEP) SleepStage.DEEP else SleepStage.LIGHT
+                    smoothed[i] = smoothed[i].copy(stage = fallback.code, confidence = 0.0f)
+                    smoothed[i + 1] = smoothed[i + 1].copy(stage = fallback.code, confidence = 0.0f)
+                }
             }
-        }
 
-        return smoothed
+            // Pass 2: Eliminate isolated 1-epoch (30s) AWAKE spikes embedded inside sleep (Movement Micro-Arousals)
+            for (i in 1 until smoothed.size - 1) {
+                val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+                val curr = SleepStage.fromCode(smoothed[i].stage)
+                val next = SleepStage.fromCode(smoothed[i + 1].stage)
+
+                if (curr == SleepStage.AWAKE && prev != SleepStage.AWAKE && next != SleepStage.AWAKE) {
+                    // Nocturnal micro-arousal / rollover (HR < 96 bpm): preserve continuity of surrounding sleep
+                    if (smoothed[i].heartRate < 96) {
+                        val fallback = if (prev == next) prev else if (prev == SleepStage.REM || next == SleepStage.REM) SleepStage.REM else SleepStage.LIGHT
+                        smoothed[i] = smoothed[i].copy(stage = fallback.code)
+                    }
+                }
+            }
+
+            // Pass 3: Eliminate isolated 2-epoch (60s) AWAKE spikes embedded inside sleep
+            for (i in 1 until smoothed.size - 2) {
+                val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+                val curr1 = SleepStage.fromCode(smoothed[i].stage)
+                val curr2 = SleepStage.fromCode(smoothed[i + 1].stage)
+                val next = SleepStage.fromCode(smoothed[i + 2].stage)
+
+                if (curr1 == SleepStage.AWAKE && curr2 == SleepStage.AWAKE &&
+                    prev != SleepStage.AWAKE && next != SleepStage.AWAKE
+                ) {
+                    if (smoothed[i].heartRate < 96 && smoothed[i + 1].heartRate < 96) {
+                        val fallback = if (prev == next) prev else if (prev == SleepStage.REM || next == SleepStage.REM) SleepStage.REM else SleepStage.LIGHT
+                        smoothed[i] = smoothed[i].copy(stage = fallback.code)
+                        smoothed[i + 1] = smoothed[i + 1].copy(stage = fallback.code)
+                    }
+                }
+            }
+
+            return smoothed
+        }
     }
 
     suspend fun deleteSession(sessionId: Long) = withContext(Dispatchers.IO) {

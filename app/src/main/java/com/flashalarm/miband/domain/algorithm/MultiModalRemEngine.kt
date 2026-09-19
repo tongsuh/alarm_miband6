@@ -112,7 +112,7 @@ class MultiModalRemEngine(
         val atoniaScore = (1.0f - (avgMovement / 0.08f)).coerceIn(0.0f, 1.0f)
 
         // Movement Classification:
-        // A. Any movement spike (including brief micro-twitch):
+        // A. Any movement spike (including brief micro-twitch or single rollover):
         val isAnyMovement = peakActigraphy > 0.18f || actigraphyMagnitude > 0.08f
         if (isAnyMovement) {
             consecutiveMovingEpochs++
@@ -125,13 +125,12 @@ class MultiModalRemEngine(
         val isVigorousWakeMovement = (actigraphyMagnitude >= 0.30f && (heartRate >= 72 || (deepSleepBaselineHr > 0 && (heartRate - deepSleepBaselineHr) / deepSleepBaselineHr >= 0.20f))) ||
                 actigraphyMagnitude >= 0.45f
 
-        // C. Sustained macroscopic movement across epochs (>= 2 epochs with movement or multi-minute elevated average):
-        val isSustainedMovement = (consecutiveMovingEpochs >= 2 && actigraphyMagnitude >= 0.10f) ||
-                consecutiveMovingEpochs >= 3 ||
-                avgMovement > 0.18f
-
-        // True Awakening requires either vigorous waking movement or sustained movement across epochs:
-        val isSustainedAwake = isVigorousWakeMovement || isSustainedMovement
+        // C. Sustained macroscopic movement across epochs:
+        // Under AASM guidelines, an isolated rollover or postural shift (<15s) in sleep is a movement micro-arousal, NOT Stage Wake.
+        // True awakening requires sustained physical movement across >= 3 epochs (90s), or vigorous waking movement across >= 2 epochs, or high multi-minute average:
+        val isSustainedAwake = (consecutiveMovingEpochs >= 3) ||
+                (consecutiveMovingEpochs >= 2 && isVigorousWakeMovement) ||
+                (avgMovement > 0.22f)
 
         // Per user requirement:
         // Micro-movements / normal isolated rollovers DO NOT veto dream cue vibrations! Only sustained awakening vetoes vibration.
@@ -259,26 +258,15 @@ class MultiModalRemEngine(
                 tentativeRemConfidence = 0.12f * ultradianPrior
             }
         } else {
-            tentativeStage = if (avgMovement > 0.18f || consecutiveMovingEpochs >= 2) SleepStage.AWAKE else SleepStage.LIGHT
+            tentativeStage = if (isSustainedAwake) SleepStage.AWAKE else SleepStage.LIGHT
             tentativeRemConfidence = 0.05f
         }
 
-        // 3-Epoch Temporal Hysteresis Filter:
+        // Temporal Hysteresis Filter:
         // Eliminates 1-minute isolated chattering between stages (e.g. 1m AWAKE next to 1m REM)
         val determinedStage: SleepStage
-        if (isVigorousWakeMovement) {
-            // Immediate vigorous waking action (e.g. sitting up in bed): output AWAKE for this epoch
-            determinedStage = SleepStage.AWAKE
-            if (consecutiveMovingEpochs >= 2) {
-                lastEstablishedStage = SleepStage.AWAKE
-                pendingStage = null
-                pendingStageCount = 0
-            } else {
-                pendingStage = SleepStage.AWAKE
-                pendingStageCount = 1
-            }
-        } else if (isSustainedMovement) {
-            // Confirmed sustained movement across >= 2 epochs
+        if (isSustainedAwake) {
+            // Confirmed sustained waking movement across epochs
             lastEstablishedStage = SleepStage.AWAKE
             pendingStage = null
             pendingStageCount = 0
@@ -288,16 +276,30 @@ class MultiModalRemEngine(
             pendingStageCount = 0
             determinedStage = lastEstablishedStage
         } else {
+            // Stage transition requested.
+            // Minimum confirmation requirements:
+            // 1. Entering REM: requires at least 4 consecutive epochs (2 minutes), or 3 epochs with high confidence (>=0.82).
+            //    This mathematically guarantees an isolated 60-second autonomic blip can never output a 1-minute REM period!
+            // 2. Exiting REM into NREM: requires at least 3 consecutive epochs (90 seconds) of non-REM signals,
+            //    protecting against transient 1-2 epoch drops during consolidated REM sleep.
+            // 3. Transition to AWAKE: requires 3 consecutive epochs (90 seconds).
+            // 4. Other transitions (LIGHT <-> DEEP, AWAKE -> LIGHT): requires 2 consecutive epochs (60 seconds).
+            val requiredConfirmEpochs = when {
+                tentativeStage == SleepStage.REM -> if (tentativeRemConfidence >= 0.82f) 3 else 4
+                lastEstablishedStage == SleepStage.REM -> 3
+                tentativeStage == SleepStage.AWAKE -> 3
+                else -> 2
+            }
+
             if (pendingStage == tentativeStage) {
                 pendingStageCount++
-                if (pendingStageCount >= 2) {
-                    // Confirmed transition across 2 consecutive epochs (60s)
+                if (pendingStageCount >= requiredConfirmEpochs) {
                     lastEstablishedStage = tentativeStage
                     pendingStage = null
                     pendingStageCount = 0
                     determinedStage = tentativeStage
                 } else {
-                    // Hold established stage for 1 epoch to smooth away transient artifacts
+                    // Hold established stage to smooth away transient artifacts
                     determinedStage = lastEstablishedStage
                 }
             } else {

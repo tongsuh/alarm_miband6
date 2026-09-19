@@ -25,24 +25,76 @@ class MultiModalRemEngineTest {
     }
 
     @Test
-    fun `test movement veto rule - roll over or arm lift immediately vetoes REM`() {
+    fun `test sustained wake movement across epochs confirms AWAKE stage`() {
         engine.markSleepOnset(0L)
         // Feed still baseline to establish deep sleep
         for (i in 0 until 10) {
             engine.evaluateEpoch(heartRate = 55, actigraphyMagnitude = 0.01f, currentTimeMs = 1000L * i)
         }
 
-        // Simulate sudden arm movement (e.g. 0.35g)
-        val result = engine.evaluateEpoch(
+        // 1st moving epoch (isolated movement arousal): does not flip to AWAKE
+        val epoch1 = engine.evaluateEpoch(
             heartRate = 75,
             actigraphyMagnitude = 0.35f,
             currentTimeMs = 15000L
         )
+        assertEquals("Isolated rollover should not flip to AWAKE immediately", SleepStage.DEEP, epoch1.stage)
 
-        assertTrue("Movement should veto REM staging", result.isVetoedByMovement)
-        assertEquals(SleepStage.AWAKE, result.stage)
-        assertEquals(0.0f, result.confidence, 0.001f)
-        assertFalse("Cannot trigger dream cue when moving", result.isDreamCueTriggered)
+        // 2nd vigorous moving epoch
+        engine.evaluateEpoch(
+            heartRate = 75,
+            actigraphyMagnitude = 0.35f,
+            currentTimeMs = 45000L
+        )
+
+        // 3rd moving epoch confirms sustained wakefulness
+        val epoch3 = engine.evaluateEpoch(
+            heartRate = 78,
+            actigraphyMagnitude = 0.35f,
+            currentTimeMs = 75000L
+        )
+        assertTrue("Sustained movement should veto REM staging", epoch3.isVetoedByMovement)
+        assertEquals(SleepStage.AWAKE, epoch3.stage)
+        assertEquals(0.0f, epoch3.confidence, 0.001f)
+        assertFalse("Cannot trigger dream cue when awake", epoch3.isDreamCueTriggered)
+    }
+
+    @Test
+    fun `test transient 60s autonomic surge does not trigger 1-minute REM`() {
+        engine.markSleepOnset(0L)
+        // Establish baseline
+        for (i in 0 until 10) {
+            engine.evaluateEpoch(heartRate = 56, actigraphyMagnitude = 0.01f, currentTimeMs = 1000L * i)
+        }
+
+        val remTimeMs = 80 * 60 * 1000L
+
+        // Feed only 2 epochs (60 seconds) of autonomic surge
+        val epoch1 = engine.evaluateEpoch(
+            heartRate = 76,
+            actigraphyMagnitude = 0.008f,
+            audioIrregularity = 0.65f,
+            isAudioReliable = true,
+            currentTimeMs = remTimeMs
+        )
+        val epoch2 = engine.evaluateEpoch(
+            heartRate = 78,
+            actigraphyMagnitude = 0.008f,
+            audioIrregularity = 0.65f,
+            isAudioReliable = true,
+            currentTimeMs = remTimeMs + 30000L
+        )
+
+        // Fluctuation ends on epoch 3
+        val epoch3 = engine.evaluateEpoch(
+            heartRate = 60,
+            actigraphyMagnitude = 0.01f,
+            currentTimeMs = remTimeMs + 60000L
+        )
+
+        assertTrue("60s surge must not trigger 1-minute REM on epoch 1", epoch1.stage != SleepStage.REM)
+        assertTrue("60s surge must not trigger 1-minute REM on epoch 2", epoch2.stage != SleepStage.REM)
+        assertTrue("Must remain non-REM on epoch 3", epoch3.stage != SleepStage.REM)
     }
 
     @Test

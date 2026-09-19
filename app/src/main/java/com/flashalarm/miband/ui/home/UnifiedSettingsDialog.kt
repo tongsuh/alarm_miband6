@@ -165,12 +165,21 @@ fun UnifiedSettingsDialog(
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(
-                        text = "外设与系统综合设置",
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = DarkTextPrimary
-                    )
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "外设与系统综合设置",
+                            fontSize = 17.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = DarkTextPrimary
+                        )
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = "v${com.flashalarm.miband.BuildConfig.VERSION_NAME}",
+                            fontSize = 11.sp,
+                            color = DarkTextTertiary,
+                            fontWeight = FontWeight.Medium
+                        )
+                    }
                     Text(
                         text = if (connectionState == BleConnectionState.CONNECTED) "手环已连通" else "手环未连接",
                         fontSize = 11.sp,
