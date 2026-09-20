@@ -38,6 +38,7 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_ENABLE_AUDIO_VERIFY = "pref_enable_audio_verify"
         private const val KEY_CONFIDENCE_THRESHOLD = "pref_confidence_threshold"
         private const val KEY_USE_2021_PROTOCOL = "pref_use_2021_protocol"
+        private const val KEY_ENGINE_MODE = "pref_rem_engine_mode"
     }
 
     private val _cueConfig = MutableStateFlow(loadCueConfig())
@@ -76,6 +77,7 @@ class UserPreferencesRepository(context: Context) {
             .putInt(KEY_COOLDOWN_MIN, config.cooldownMinutes)
             .putBoolean(KEY_ENABLE_AUDIO_VERIFY, config.enableAudioVerification)
             .putFloat(KEY_CONFIDENCE_THRESHOLD, config.confidenceThreshold)
+            .putString(KEY_ENGINE_MODE, config.engineMode.name)
             .apply()
 
         _cueConfig.value = config
@@ -87,6 +89,13 @@ class UserPreferencesRepository(context: Context) {
             deserializePatterns(patternsJson)
         } else {
             DreamCueConfig.defaultPatterns()
+        }
+
+        val engineMode = try {
+            val modeStr = prefs.getString(KEY_ENGINE_MODE, com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL.name)
+            com.flashalarm.miband.domain.model.RemEngineMode.valueOf(modeStr ?: com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL.name)
+        } catch (e: Exception) {
+            com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
         }
 
         return DreamCueConfig(
@@ -103,7 +112,8 @@ class UserPreferencesRepository(context: Context) {
             stage2HrSampleRateSeconds = prefs.getInt(KEY_STAGE2_HR_SEC, 1),
             cooldownMinutes = prefs.getInt(KEY_COOLDOWN_MIN, 20),
             enableAudioVerification = prefs.getBoolean(KEY_ENABLE_AUDIO_VERIFY, true),
-            confidenceThreshold = prefs.getFloat(KEY_CONFIDENCE_THRESHOLD, 0.72f).let { if (it >= 0.849f && it <= 0.851f) 0.72f else it }
+            confidenceThreshold = prefs.getFloat(KEY_CONFIDENCE_THRESHOLD, 0.72f).let { if (it >= 0.849f && it <= 0.851f) 0.72f else it },
+            engineMode = engineMode
         )
     }
 

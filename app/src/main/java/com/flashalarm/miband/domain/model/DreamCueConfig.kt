@@ -10,6 +10,11 @@ enum class PatternType(val displayName: String) {
     PULSE_WAVE("律动波浪");
 }
 
+enum class RemEngineMode(val displayName: String, val description: String) {
+    ML_MODEL("🤖 AI 机器学习模型 (PhysioNet)", "基于 Apple Watch + 临床脑电金标准训练的轻量决策树模型，具备 5 分钟延时确认"),
+    RULE_BASED("⚙️ 自适应生理规则引擎", "基于手腕动量微积分 + 心率突增比率 + 自主神经离散度的经典启发式引擎");
+}
+
 data class CustomizableVibrationPattern(
     val id: String,
     val name: String,
@@ -41,6 +46,7 @@ data class DreamCueConfig(
     val stage2HrSampleRateSeconds: Int = 1,      // Stage 2 (REM window): 1s, 2s, 5s
 
     // 4. Algorithm & Safety
+    val engineMode: RemEngineMode = RemEngineMode.ML_MODEL,
     val cooldownMinutes: Int = 20,
     val enableAudioVerification: Boolean = true,
     val confidenceThreshold: Float = 0.72f

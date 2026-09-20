@@ -41,6 +41,10 @@ class MultiModalRemEngine(
     private var pendingStage: SleepStage? = null
     private var pendingStageCount: Int = 0
 
+    // ML Classifier Support
+    private val remFeatureExtractor = RemFeatureExtractor()
+    private var sessionEpochCounter: Int = 0
+
     fun updateConfig(config: DreamCueConfig) {
         this.cueConfig = config
     }
@@ -63,6 +67,8 @@ class MultiModalRemEngine(
         lastEstablishedStage = SleepStage.AWAKE
         pendingStage = null
         pendingStageCount = 0
+        remFeatureExtractor.reset()
+        sessionEpochCounter = 0
     }
 
     /**
@@ -216,6 +222,26 @@ class MultiModalRemEngine(
         val elapsedMinutes = if (isSleepOnsetDetected) elapsedSinceOnsetMs / 60000f else 0f
         val ultradianPrior = if (isSleepOnsetDetected) calculateUltradianRemPrior(elapsedMinutes) else 0.05f
 
+        // 6.5 Push continuous metrics to ML Feature Extractor (maintains 21-epoch 5-min delay buffer)
+        sessionEpochCounter++
+        val mlFeatures = remFeatureExtractor.pushEpoch(
+            epochIndex = sessionEpochCounter,
+            meanHr = if (heartRate in 36..219) heartRate.toFloat() else deepSleepBaselineHr,
+            stdHr = intraEpochHrStdDev,
+            meanMotion = actigraphyMagnitude,
+            peakMotion = peakActigraphy
+        )
+        val mlRemProbability: Float? = if (mlFeatures != null) {
+            try {
+                val probs = RemClassifierModel.score(mlFeatures)
+                probs[1].toFloat()
+            } catch (e: Exception) {
+                null
+            }
+        } else null
+
+        val isMlMode = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
+
         // 7. Staging Decision & 3-Epoch Temporal Hysteresis Filter
         // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
         val isAutonomicSurge = (hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
@@ -228,7 +254,20 @@ class MultiModalRemEngine(
         if (isSustainedAwake) {
             tentativeStage = SleepStage.AWAKE
             tentativeRemConfidence = 0.0f
+        } else if (isMlMode && mlRemProbability != null) {
+            // Option 2: AI Machine Learning Decision Path (Trained on PhysioNet Sleep-Accel)
+            if (mlRemProbability >= 0.50f && atoniaScore > 0.60f) {
+                tentativeStage = SleepStage.REM
+                tentativeRemConfidence = mlRemProbability
+            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                tentativeStage = SleepStage.DEEP
+                tentativeRemConfidence = 0.0f
+            } else {
+                tentativeStage = SleepStage.LIGHT
+                tentativeRemConfidence = mlRemProbability * 0.3f
+            }
         } else if (atoniaScore > 0.70f) {
+            // Heuristic Rule Decision Path
             if (isAutonomicSurge) {
                 tentativeStage = SleepStage.REM
 
@@ -330,7 +369,13 @@ class MultiModalRemEngine(
         val shouldTrigger = isEligible && isCooldownPassed
 
         val triggerReason = when {
-            shouldTrigger -> "多模态印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
+            shouldTrigger -> {
+                if (isMlMode && mlRemProbability != null) {
+                    "AI决策树模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}%)"
+                } else {
+                    "多模态规则印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
+                }
+            }
             isVetoedByMovement -> "手腕体动一票否决"
             !isSleepOnsetDetected -> "正在监测入睡状态 (静息沉淀 ${sustainedStillnessEpochs}/16)"
             sessionPhase == SleepSessionPhase.PROTECTION_PERIOD -> "处于前半夜深睡保护期 (剩余 $protectionRemainingMinutes 分钟)"

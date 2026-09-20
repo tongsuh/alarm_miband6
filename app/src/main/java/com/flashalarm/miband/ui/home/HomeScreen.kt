@@ -843,6 +843,73 @@ private fun DreamCueConfigCard(
                     colors = SwitchDefaults.colors(checkedThumbColor = GoldDream, checkedTrackColor = GoldDream.copy(alpha = 0.3f))
                 )
             }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // --- Section 4: Detection Engine Selection ---
+            Text("核心做梦期判决引擎", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Option A: ML Model
+                val isMlSelected = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isMlSelected) GoldDream.copy(alpha = 0.15f) else DarkSurface)
+                        .border(1.dp, if (isMlSelected) GoldDream else DarkBorder, RoundedCornerShape(10.dp))
+                        .clickable { onConfigChange(cueConfig.copy(engineMode = com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL)) }
+                        .padding(vertical = 10.dp, horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "🤖 AI 决策树模型",
+                            fontSize = 12.sp,
+                            fontWeight = if (isMlSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isMlSelected) GoldDream else DarkTextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "5分钟延时 · PhysioNet",
+                            fontSize = 10.sp,
+                            color = if (isMlSelected) GoldDream.copy(alpha = 0.8f) else DarkTextTertiary
+                        )
+                    }
+                }
+
+                // Option B: Rule Based
+                val isRuleSelected = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.RULE_BASED
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isRuleSelected) MiBandCyan.copy(alpha = 0.15f) else DarkSurface)
+                        .border(1.dp, if (isRuleSelected) MiBandCyan else DarkBorder, RoundedCornerShape(10.dp))
+                        .clickable { onConfigChange(cueConfig.copy(engineMode = com.flashalarm.miband.domain.model.RemEngineMode.RULE_BASED)) }
+                        .padding(vertical = 10.dp, horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(
+                            text = "⚙️ 生理规则引擎",
+                            fontSize = 12.sp,
+                            fontWeight = if (isRuleSelected) FontWeight.Bold else FontWeight.Normal,
+                            color = if (isRuleSelected) MiBandCyan else DarkTextPrimary
+                        )
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "自适应心率突增与离散",
+                            fontSize = 10.sp,
+                            color = if (isRuleSelected) MiBandCyan.copy(alpha = 0.8f) else DarkTextTertiary
+                        )
+                    }
+                }
+            }
         }
     }
 }
@@ -895,6 +962,10 @@ private fun AlgorithmOverviewCard() {
                     AlgorithmBullet(
                         title = "声学印证与精准触达",
                         desc = "夜间呼吸不规则度交叉验证，置信度达标后下发腕部微震或潜意识耳语"
+                    )
+                    AlgorithmBullet(
+                        title = "AI 决策树与规则双擎可选",
+                        desc = "支持基于临床脑电金标准训练的 5 分钟延时 AI 决策树，或自适应生理规则引擎自由切换"
                     )
                 }
             }

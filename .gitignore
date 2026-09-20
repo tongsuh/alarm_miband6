@@ -18,3 +18,10 @@ local.properties
 # Do NOT ignore release.jks and gradle-wrapper.jar
 !app/release.jks
 !gradle/wrapper/gradle-wrapper.jar
+
+# Python ML Trainer & Large Datasets
+__pycache__/
+*.pyc
+*.zip
+rem_ml_trainer/sleep-accel/
+
