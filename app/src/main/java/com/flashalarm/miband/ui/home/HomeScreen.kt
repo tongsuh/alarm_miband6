@@ -618,6 +618,7 @@ private fun DreamCueConfigCard(
     onToggleAudioTest: () -> Unit,
     onQuickTestVibration: () -> Unit
 ) {
+    val context = LocalContext.current
     Card(
         modifier = Modifier
             .fillMaxWidth()
