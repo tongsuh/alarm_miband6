@@ -179,7 +179,7 @@ fun SleepModeScreen(
                 indication = null
             ) {
                 // If a dream cue is active, tapping anywhere dismisses the cue and confirms consciousness
-                if (activeCue != null && !activeCue!!.isAcknowledged) {
+                if (activeCue?.isAcknowledged == false) {
                     SleepGuardService.acknowledgeActiveCue(app)
                 }
                 isAwakeBrightness = true

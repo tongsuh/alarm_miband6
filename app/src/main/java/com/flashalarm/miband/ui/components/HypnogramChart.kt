@@ -186,9 +186,9 @@ fun HypnogramChart(
 
             // Second line: dream cue moment and current time, appended below without replacing line 1
             if (matchedCue != null) {
-                val currentPointTime = if (scrubIndex != null && scrubIndex!! in epochs.indices) {
-                    timeFormat.format(Date(epochs[scrubIndex!!].timestamp))
-                } else ""
+                val currentPointTime = scrubIndex?.let { idx ->
+                    if (idx in epochs.indices) timeFormat.format(Date(epochs[idx].timestamp)) else ""
+                } ?: ""
 
                 Spacer(modifier = Modifier.height(6.dp))
                 Row(

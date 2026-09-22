@@ -7,6 +7,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -15,6 +16,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -95,6 +97,14 @@ fun UnifiedSettingsDialog(
     val metrics by bleManager.deviceMetrics.collectAsState()
     val deviceInfo by bleManager.deviceInfo.collectAsState()
 
+    val ecgBleManager = app.ecgBleManager
+    val ecgConnState by ecgBleManager.connectionState.collectAsState()
+    val ecgHr by ecgBleManager.currentHeartRate.collectAsState()
+    val ecgLastRr by ecgBleManager.lastRrMs.collectAsState()
+    val ecgRecentRr by ecgBleManager.recentRrList.collectAsState()
+    val isLeadsOff by ecgBleManager.isLeadsOff.collectAsState()
+    var showEcgPairingDialog by remember { mutableStateOf(false) }
+
     var selectedTab by remember { mutableIntStateOf(0) }
     var config by remember { mutableStateOf(initialConfig) }
     var isTestingAudio by remember { mutableStateOf(false) }
@@ -134,8 +144,13 @@ fun UnifiedSettingsDialog(
             }
             // Shut off test sensor streaming when exiting settings dialog to preserve battery,
             // unless sleep guard service is actively running
-            if (!SleepGuardService.isServiceRunning.value && metrics.isMotionStreaming) {
-                bleManager.disableSensorNotifications()
+            if (!SleepGuardService.isServiceRunning.value) {
+                if (metrics.isMotionStreaming) {
+                    bleManager.disableSensorNotifications()
+                }
+                if (metrics.isHrStreaming) {
+                    bleManager.setHeartRateStreamingMode(false)
+                }
             }
         }
     }
@@ -478,6 +493,146 @@ fun UnifiedSettingsDialog(
                                             color = Color.Black,
                                             fontWeight = FontWeight.SemiBold
                                         )
+                                    }
+                                }
+                            }
+                        }
+
+                        Spacer(modifier = Modifier.height(12.dp))
+
+                        // AD8232 True-HRV ECG Card (ESP32-C3)
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(DarkSurfaceElevated)
+                                .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                                .padding(14.dp)
+                        ) {
+                            Column {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Icon(
+                                            painter = painterResource(id = R.drawable.ic_heart),
+                                            contentDescription = null,
+                                            tint = HeartRateRed,
+                                            modifier = Modifier
+                                                .size(20.dp)
+                                                .scale(if (ecgHr > 0) pulseScale else 1f)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "AD8232 真心电 (ESP32-C3)",
+                                            fontSize = 13.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = DarkTextPrimary
+                                        )
+                                    }
+
+                                    val statusText = when {
+                                        ecgConnState != BleConnectionState.CONNECTED -> "未连接"
+                                        isLeadsOff -> "⚠️ 导联脱落 (Leads-Off)"
+                                        else -> "● 毫秒级心电连通"
+                                    }
+                                    val statusColor = when {
+                                        ecgConnState != BleConnectionState.CONNECTED -> DarkTextTertiary
+                                        isLeadsOff -> Color(0xFFF59E0B)
+                                        else -> HeartRateRed
+                                    }
+                                    Text(
+                                        text = statusText,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isLeadsOff) FontWeight.Bold else FontWeight.Normal,
+                                        color = statusColor
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.Bottom
+                                ) {
+                                    Column {
+                                        Text(
+                                            text = if (ecgHr > 0) "$ecgHr" else "--",
+                                            fontSize = 32.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = HeartRateRed
+                                        )
+                                        Text(
+                                            text = "BPM / 实时心电心率",
+                                            fontSize = 12.sp,
+                                            color = DarkTextSecondary
+                                        )
+                                    }
+
+                                    Column(horizontalAlignment = Alignment.End) {
+                                        Text(
+                                            text = if (ecgLastRr > 0.0) "%.0f ms".format(ecgLastRr) else "-- ms",
+                                            fontSize = 24.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            fontFamily = FontFamily.Monospace,
+                                            color = GoldDream
+                                        )
+                                        Text(
+                                            text = "R-R 间期 (${ecgRecentRr.size} 拍采样)",
+                                            fontSize = 11.sp,
+                                            color = DarkTextSecondary
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                // Real-time R-R Tachogram Canvas
+                                RrTachogramCanvas(
+                                    rrList = ecgRecentRr,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(52.dp)
+                                )
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    if (ecgConnState == BleConnectionState.CONNECTED) {
+                                        Button(
+                                            onClick = { ecgBleManager.disconnect() },
+                                            modifier = Modifier.weight(1f).height(36.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155))
+                                        ) {
+                                            Text("断开心电外设", fontSize = 12.sp, color = Color.White)
+                                        }
+                                    } else {
+                                        Button(
+                                            onClick = { showEcgPairingDialog = true },
+                                            modifier = Modifier.weight(1f).height(36.dp),
+                                            shape = RoundedCornerShape(8.dp),
+                                            colors = ButtonDefaults.buttonColors(containerColor = HeartRateRed)
+                                        ) {
+                                            Text("配对连接 ESP32", fontSize = 12.sp, color = Color.White, fontWeight = FontWeight.SemiBold)
+                                        }
+                                        if (config.ad8232MacAddress.isNotBlank()) {
+                                            Button(
+                                                onClick = { ecgBleManager.connect(config.ad8232MacAddress) },
+                                                modifier = Modifier.weight(1f).height(36.dp),
+                                                shape = RoundedCornerShape(8.dp),
+                                                colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF334155))
+                                            ) {
+                                                Text("重连上次设备", fontSize = 12.sp, color = Color.White)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -904,4 +1059,101 @@ fun UnifiedSettingsDialog(
             }
         }
     )
+
+    if (showEcgPairingDialog) {
+        EcgPairingDialog(
+            ecgBleManager = ecgBleManager,
+            initialMac = config.ad8232MacAddress,
+            onSaveAndConnect = { mac, name ->
+                val updated = config.copy(
+                    enableAd8232Ecg = true,
+                    ad8232MacAddress = mac,
+                    ad8232DeviceName = name
+                )
+                config = updated
+                onSaveConfig(updated)
+                ecgBleManager.connect(mac)
+                showEcgPairingDialog = false
+            },
+            onDismiss = {
+                showEcgPairingDialog = false
+            }
+        )
+    }
 }
+
+@Composable
+private fun RrTachogramCanvas(
+    rrList: List<Double>,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(Color(0xFF0F172A))
+            .border(1.dp, DarkBorder, RoundedCornerShape(8.dp))
+            .padding(horizontal = 8.dp, vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        if (rrList.size < 2) {
+            Text(
+                text = if (rrList.isEmpty()) "等待 ESP32-C3 传输 R-R 间期..." else "采集中 (已捕获 1 拍)...",
+                fontSize = 10.sp,
+                color = DarkTextTertiary
+            )
+        } else {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val w = size.width
+                val h = size.height
+                if (w <= 0f || h <= 0f) return@Canvas
+                val minVal = (rrList.minOrNull() ?: 600.0) - 40.0
+                val maxVal = (rrList.maxOrNull() ?: 1000.0) + 40.0
+                val range = (maxVal - minVal).coerceAtLeast(50.0)
+
+                // 绘制中位线参考基准
+                val midY = h / 2f
+                drawLine(
+                    color = Color.White.copy(alpha = 0.08f),
+                    start = androidx.compose.ui.geometry.Offset(0f, midY),
+                    end = androidx.compose.ui.geometry.Offset(w, midY),
+                    strokeWidth = 1f
+                )
+
+                val stepX = w / (rrList.size - 1).coerceAtLeast(1)
+                val path = androidx.compose.ui.graphics.Path()
+
+                rrList.forEachIndexed { index, rr ->
+                    val x = index * stepX
+                    val normalizedY = 1.0 - ((rr - minVal) / range).coerceIn(0.0, 1.0)
+                    val y = (normalizedY * (h - 8) + 4).toFloat()
+
+                    if (index == 0) {
+                        path.moveTo(x, y)
+                    } else {
+                        path.lineTo(x, y)
+                    }
+
+                    // 对最新几个采样点绘制高亮圆点
+                    if (index >= rrList.size - 3) {
+                        drawCircle(
+                            color = if (index == rrList.size - 1) HeartRateRed else GoldDream,
+                            radius = if (index == rrList.size - 1) 3.5f else 2f,
+                            center = androidx.compose.ui.geometry.Offset(x, y)
+                        )
+                    }
+                }
+
+                drawPath(
+                    path = path,
+                    color = GoldDream,
+                    style = androidx.compose.ui.graphics.drawscope.Stroke(
+                        width = 2f,
+                        cap = androidx.compose.ui.graphics.StrokeCap.Round,
+                        join = androidx.compose.ui.graphics.StrokeJoin.Round
+                    )
+                )
+            }
+        }
+    }
+}
+

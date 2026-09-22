@@ -3,6 +3,7 @@ package com.flashalarm.miband
 import android.app.Application
 import com.flashalarm.miband.data.audio.BreathingAudioAnalyzer
 import com.flashalarm.miband.data.audio.DreamAudioPlayer
+import com.flashalarm.miband.data.ble.EcgBleManager
 import com.flashalarm.miband.data.ble.MiBandBleManager
 import com.flashalarm.miband.data.db.SleepDatabase
 import com.flashalarm.miband.data.repository.SleepRepository
@@ -19,6 +20,7 @@ class FlashAlarmApp : Application() {
     val sleepRepository by lazy { SleepRepository(database) }
     val userPreferencesRepository by lazy { UserPreferencesRepository(this) }
     val bleManager by lazy { MiBandBleManager(this, applicationScope) }
+    val ecgBleManager by lazy { EcgBleManager(this, applicationScope) }
     val audioPlayer by lazy { DreamAudioPlayer(this, applicationScope) }
     val audioAnalyzer by lazy { BreathingAudioAnalyzer(applicationScope) }
     val remEngine by lazy { MultiModalRemEngine(userPreferencesRepository.cueConfig.value) }
@@ -31,6 +33,11 @@ class FlashAlarmApp : Application() {
         val use2021 = userPreferencesRepository.getUse2021Protocol()
         if (mac.isNotBlank()) {
             bleManager.setTargetDevice("Mi Smart Band 6", mac, authKey, use2021)
+        }
+
+        val ecgMac = userPreferencesRepository.getEcgMac()
+        if (ecgMac.isNotBlank()) {
+            ecgBleManager.setTargetDevice(ecgMac)
         }
     }
 }

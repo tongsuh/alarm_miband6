@@ -5,3 +5,4 @@ lightgbm>=4.0.0
 m2cgen>=0.10.0
 requests>=2.28.0
 tqdm>=4.65.0
+wfdb>=4.1.0

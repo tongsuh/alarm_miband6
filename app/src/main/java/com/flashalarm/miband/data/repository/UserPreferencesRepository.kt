@@ -39,6 +39,9 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_CONFIDENCE_THRESHOLD = "pref_confidence_threshold"
         private const val KEY_USE_2021_PROTOCOL = "pref_use_2021_protocol"
         private const val KEY_ENGINE_MODE = "pref_rem_engine_mode"
+        private const val KEY_ENABLE_AD8232_ECG = "pref_enable_ad8232_ecg"
+        private const val KEY_AD8232_MAC = "pref_ad8232_mac"
+        private const val KEY_AD8232_NAME = "pref_ad8232_name"
     }
 
     private val _cueConfig = MutableStateFlow(loadCueConfig())
@@ -78,9 +81,18 @@ class UserPreferencesRepository(context: Context) {
             .putBoolean(KEY_ENABLE_AUDIO_VERIFY, config.enableAudioVerification)
             .putFloat(KEY_CONFIDENCE_THRESHOLD, config.confidenceThreshold)
             .putString(KEY_ENGINE_MODE, config.engineMode.name)
+            .putBoolean(KEY_ENABLE_AD8232_ECG, config.enableAd8232Ecg)
+            .putString(KEY_AD8232_MAC, config.ad8232MacAddress)
+            .putString(KEY_AD8232_NAME, config.ad8232DeviceName)
             .apply()
 
         _cueConfig.value = config
+    }
+
+    fun getEcgMac(): String = prefs.getString(KEY_AD8232_MAC, "") ?: ""
+    fun saveEcgMac(mac: String) {
+        prefs.edit().putString(KEY_AD8232_MAC, mac).apply()
+        _cueConfig.value = _cueConfig.value.copy(ad8232MacAddress = mac)
     }
 
     private fun loadCueConfig(): DreamCueConfig {
@@ -92,10 +104,10 @@ class UserPreferencesRepository(context: Context) {
         }
 
         val engineMode = try {
-            val modeStr = prefs.getString(KEY_ENGINE_MODE, com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL.name)
-            com.flashalarm.miband.domain.model.RemEngineMode.valueOf(modeStr ?: com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL.name)
+            val modeStr = prefs.getString(KEY_ENGINE_MODE, com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL.name)
+            com.flashalarm.miband.domain.model.RemEngineMode.valueOf(modeStr ?: com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL.name)
         } catch (e: Exception) {
-            com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
+            com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
         }
 
         return DreamCueConfig(
@@ -112,8 +124,11 @@ class UserPreferencesRepository(context: Context) {
             stage2HrSampleRateSeconds = prefs.getInt(KEY_STAGE2_HR_SEC, 1),
             cooldownMinutes = prefs.getInt(KEY_COOLDOWN_MIN, 20),
             enableAudioVerification = prefs.getBoolean(KEY_ENABLE_AUDIO_VERIFY, true),
-            confidenceThreshold = prefs.getFloat(KEY_CONFIDENCE_THRESHOLD, 0.72f).let { if (it >= 0.849f && it <= 0.851f) 0.72f else it },
-            engineMode = engineMode
+            confidenceThreshold = prefs.getFloat(KEY_CONFIDENCE_THRESHOLD, 0.55f).let { if (it >= 0.849f && it <= 0.851f) 0.55f else it },
+            engineMode = engineMode,
+            enableAd8232Ecg = prefs.getBoolean(KEY_ENABLE_AD8232_ECG, true),
+            ad8232MacAddress = prefs.getString(KEY_AD8232_MAC, "") ?: "",
+            ad8232DeviceName = prefs.getString(KEY_AD8232_NAME, "FlashAlarm-ECG") ?: "FlashAlarm-ECG"
         )
     }
 

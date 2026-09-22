@@ -1,6 +1,7 @@
 package com.flashalarm.miband.domain.algorithm
 
 import com.flashalarm.miband.domain.model.DreamCueConfig
+import com.flashalarm.miband.domain.model.RemEngineMode
 import com.flashalarm.miband.domain.model.RemStagingResult
 import com.flashalarm.miband.domain.model.SleepSessionPhase
 import com.flashalarm.miband.domain.model.SleepStage
@@ -43,10 +44,19 @@ class MultiModalRemEngine(
 
     // ML Classifier Support
     private val remFeatureExtractor = RemFeatureExtractor()
+    private val remHrvFeatureExtractor = RemHrvFeatureExtractor()
     private var sessionEpochCounter: Int = 0
 
     fun updateConfig(config: DreamCueConfig) {
         this.cueConfig = config
+    }
+
+    fun pushRrInterval(rrMs: Double, timestampMs: Long = System.currentTimeMillis()) {
+        remHrvFeatureExtractor.pushRrInterval(rrMs, timestampMs)
+    }
+
+    fun pushActigraphy(actG: Double, timestampMs: Long = System.currentTimeMillis()) {
+        remHrvFeatureExtractor.pushMotion(actG, timestampMs)
     }
 
     fun startSession(startTimeMs: Long = System.currentTimeMillis()) {
@@ -68,6 +78,7 @@ class MultiModalRemEngine(
         pendingStage = null
         pendingStageCount = 0
         remFeatureExtractor.reset()
+        remHrvFeatureExtractor.reset()
         sessionEpochCounter = 0
     }
 
@@ -234,13 +245,29 @@ class MultiModalRemEngine(
         val mlRemProbability: Float? = if (mlFeatures != null) {
             try {
                 val probs = RemClassifierModel.score(mlFeatures)
-                probs[1].toFloat()
+                if (probs != null && probs.size >= 2) probs[1].toFloat() else null
             } catch (e: Exception) {
                 null
             }
         } else null
 
-        val isMlMode = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
+        val isDualEcgMode = cueConfig.engineMode == RemEngineMode.AD8232_DUAL
+        val isMlMode = cueConfig.engineMode == RemEngineMode.ML_MODEL
+
+        // 6.6 Push continuous metrics to PAAWS R2 True-HRV & Actigraphy Dual-Modality Extractor
+        val hrvFeatures = remHrvFeatureExtractor.onEpochTick(
+            epochIdx = sessionEpochCounter.toLong(),
+            fallbackMotionMean = actigraphyMagnitude.toDouble(),
+            fallbackMotionMax = peakActigraphy.toDouble()
+        )
+        val hrvRemProbability: Float? = if (hrvFeatures != null) {
+            try {
+                val probs = RemHrvClassifierModel.score(hrvFeatures)
+                if (probs != null && probs.size >= 2) probs[1].toFloat() else null
+            } catch (e: Exception) {
+                null
+            }
+        } else null
 
         // 7. Staging Decision & 3-Epoch Temporal Hysteresis Filter
         // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
@@ -254,9 +281,21 @@ class MultiModalRemEngine(
         if (isSustainedAwake) {
             tentativeStage = SleepStage.AWAKE
             tentativeRemConfidence = 0.0f
+        } else if (isDualEcgMode && hrvRemProbability != null) {
+            // Option 1: PAAWS R2 True-HRV + Actigraphy Dual-Modality Decision Path (141 subjects ground truth)
+            if (hrvRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
+                tentativeStage = SleepStage.REM
+                tentativeRemConfidence = hrvRemProbability
+            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                tentativeStage = SleepStage.DEEP
+                tentativeRemConfidence = 0.0f
+            } else {
+                tentativeStage = SleepStage.LIGHT
+                tentativeRemConfidence = hrvRemProbability * 0.3f
+            }
         } else if (isMlMode && mlRemProbability != null) {
             // Option 2: AI Machine Learning Decision Path (Trained on PhysioNet Sleep-Accel)
-            if (mlRemProbability >= 0.50f && atoniaScore > 0.60f) {
+            if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.60f) {
                 tentativeStage = SleepStage.REM
                 tentativeRemConfidence = mlRemProbability
             } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
@@ -267,7 +306,7 @@ class MultiModalRemEngine(
                 tentativeRemConfidence = mlRemProbability * 0.3f
             }
         } else if (atoniaScore > 0.70f) {
-            // Heuristic Rule Decision Path
+            // Heuristic Rule Decision Path (or Failover fallback)
             if (isAutonomicSurge) {
                 tentativeStage = SleepStage.REM
 
@@ -316,15 +355,15 @@ class MultiModalRemEngine(
             determinedStage = lastEstablishedStage
         } else {
             // Stage transition requested.
-            // Minimum confirmation requirements:
-            // 1. Entering REM: requires at least 4 consecutive epochs (2 minutes), or 3 epochs with high confidence (>=0.82).
-            //    This mathematically guarantees an isolated 60-second autonomic blip can never output a 1-minute REM period!
-            // 2. Exiting REM into NREM: requires at least 3 consecutive epochs (90 seconds) of non-REM signals,
-            //    protecting against transient 1-2 epoch drops during consolidated REM sleep.
-            // 3. Transition to AWAKE: requires 3 consecutive epochs (90 seconds).
-            // 4. Other transitions (LIGHT <-> DEEP, AWAKE -> LIGHT): requires 2 consecutive epochs (60 seconds).
             val requiredConfirmEpochs = when {
-                tentativeStage == SleepStage.REM -> if (tentativeRemConfidence >= 0.82f) 3 else 4
+                tentativeStage == SleepStage.REM -> {
+                    when {
+                        cueConfig.confidenceThreshold <= 0.45f -> 3
+                        tentativeRemConfidence >= 0.80f -> 3
+                        cueConfig.confidenceThreshold >= 0.65f -> 4
+                        else -> 4
+                    }
+                }
                 lastEstablishedStage == SleepStage.REM -> 3
                 tentativeStage == SleepStage.AWAKE -> 3
                 else -> 2
@@ -370,8 +409,10 @@ class MultiModalRemEngine(
 
         val triggerReason = when {
             shouldTrigger -> {
-                if (isMlMode && mlRemProbability != null) {
-                    "AI决策树模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}%)"
+                if (isDualEcgMode && hrvRemProbability != null) {
+                    "PAAWS R2 真心电双模态命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                } else if (isMlMode && mlRemProbability != null) {
+                    "AI决策树模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else {
                     "多模态规则印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
                 }

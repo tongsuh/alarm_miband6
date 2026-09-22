@@ -24,4 +24,7 @@ __pycache__/
 *.pyc
 *.zip
 rem_ml_trainer/sleep-accel/
+rem_ml_trainer/slpdb_cache/
+rem_ml_trainer/*.csv
+*.csv
 

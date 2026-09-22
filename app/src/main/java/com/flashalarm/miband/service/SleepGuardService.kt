@@ -114,6 +114,8 @@ class SleepGuardService : Service() {
     private var lastActigraphy = 0.0f
     private val epochActigraphySamples = mutableListOf<Float>()
     private var currentActiveSessionId: Long = 0L
+    @Volatile
+    private var isMiBandPpgSuspended = false
 
     inner class LocalBinder : Binder() {
         fun getService(): SleepGuardService = this@SleepGuardService
@@ -225,6 +227,16 @@ class SleepGuardService : Service() {
                 }
             }
 
+            // 3.5 Connect AD8232 / ESP32-C3 BLE if Dual-Modality configured
+            val ecgMac = prefs.getEcgMac()
+            val isDualMode = config.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+            if (isDualMode && ecgMac.isNotBlank()) {
+                if (app.ecgBleManager.connectionState.value != com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
+                    app.ecgBleManager.setTargetDevice(ecgMac)
+                    app.ecgBleManager.connect(ecgMac)
+                }
+            }
+
             // 4. Start Audio Analyzer if configured and permitted
             if (enableAudio) {
                 try {
@@ -234,7 +246,7 @@ class SleepGuardService : Service() {
                 }
             }
 
-            // 5. Collect incoming sensor flows (1Hz continuous HR & 25Hz actigraphy)
+            // 5. Collect incoming sensor flows (1Hz continuous HR, 25Hz actigraphy & ECG R-R)
             launch {
                 app.bleManager.heartRateFlow.collect { hr ->
                     lastHeartRate = hr
@@ -247,16 +259,60 @@ class SleepGuardService : Service() {
             launch {
                 app.bleManager.actigraphyFlow.collect { act ->
                     lastActigraphy = act
+                    app.remEngine.pushActigraphy(act.toDouble())
                     synchronized(epochActigraphySamples) {
                         epochActigraphySamples.add(act)
                     }
                 }
             }
+            launch {
+                app.ecgBleManager.rrIntervalFlow.collect { rrMs ->
+                    app.remEngine.pushRrInterval(rrMs)
+                }
+            }
 
-            // 6. Ensure high-frequency HR streaming for continuous sleep monitoring
+            // 6. Ensure initial high-frequency sensor streaming
             app.bleManager.setHeartRateStreamingMode(true)
-            // Enable 25Hz raw actigraphy streaming for sleep monitoring
             app.bleManager.enableSensorNotifications()
+
+            // 6.5 Failover & Power-Saving State Machine for Dual-Modality
+            launch {
+                while (isActive) {
+                    val currentCfg = app.userPreferencesRepository.cueConfig.value
+                    val dualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+                    val ecgTarget = currentCfg.ad8232MacAddress.ifBlank { ecgMac }
+                    if (dualActive && ecgTarget.isNotBlank()) {
+                        val isEcgConnected = app.ecgBleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED
+                        val isLeadsOff = app.ecgBleManager.isLeadsOff.value
+
+                        if (isEcgConnected && !isLeadsOff) {
+                            // Primary mode: ECG healthy. Turn OFF Mi Band optical PPG for power saving
+                            if (!isMiBandPpgSuspended) {
+                                Log.d(TAG, "ECG is healthy and active. Suspending Mi Band PPG for power saving.")
+                                app.bleManager.setHeartRateStreamingMode(false)
+                                isMiBandPpgSuspended = true
+                            }
+                        } else {
+                            // Failover mode: Leads off or ECG disconnected. Turn ON Mi Band optical PPG fallback!
+                            if (isMiBandPpgSuspended) {
+                                Log.w(TAG, "ECG leads off or disconnected! Triggering Failover: Resuming Mi Band PPG fallback.")
+                                app.bleManager.setHeartRateStreamingMode(true)
+                                lastHeartRateReceivedTimeMs = System.currentTimeMillis() // Reset baseline so watchdog gives time to resume
+                                isMiBandPpgSuspended = false
+                            }
+                        }
+                    } else {
+                        // Dual mode disabled or unconfigured. Ensure Band PPG is active if previously suspended
+                        if (isMiBandPpgSuspended) {
+                            Log.i(TAG, "Dual ECG mode inactive. Resuming Mi Band PPG.")
+                            app.bleManager.setHeartRateStreamingMode(true)
+                            lastHeartRateReceivedTimeMs = System.currentTimeMillis()
+                            isMiBandPpgSuspended = false
+                        }
+                    }
+                    delay(3000L)
+                }
+            }
 
             // 7. Start 30-second epoch loop
             startEpochLoop(app, sessionId)
@@ -288,8 +344,21 @@ class SleepGuardService : Service() {
                 }
 
                 val now = System.currentTimeMillis()
+                val currentCfg = app.userPreferencesRepository.cueConfig.value
+                val isDualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+                val isEcgActiveAndHealthy = isDualActive &&
+                        app.ecgBleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED &&
+                        !app.ecgBleManager.isLeadsOff.value
+
                 val isHrFresh = lastHeartRateReceivedTimeMs > 0L && (now - lastHeartRateReceivedTimeMs) < 45000L
-                val evaluatedHr = if (isHrFresh) epochMeanHr.toInt().coerceIn(36, 220) else lastHeartRate
+                val ecgHr = app.ecgBleManager.currentHeartRate.value
+                val evaluatedHr = if (isEcgActiveAndHealthy && ecgHr > 0) {
+                    ecgHr
+                } else if (isHrFresh) {
+                    epochMeanHr.toInt().coerceIn(36, 220)
+                } else {
+                    lastHeartRate
+                }
 
                 val audioState = app.audioAnalyzer.state.value
                 val stagingResult = app.remEngine.evaluateEpoch(
@@ -305,8 +374,9 @@ class SleepGuardService : Service() {
                 _liveStaging.value = stagingResult
 
                 // Maintain continuous 1Hz heart rate streaming throughout all sleep phases & Watchdog recovery
+                // Note: Only run optical PPG watchdog when Band PPG is NOT suspended for ECG power saving
                 val hrIdleMs = if (lastHeartRateReceivedTimeMs > 0L) now - lastHeartRateReceivedTimeMs else 0L
-                if (_isServiceRunning.value && app.bleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
+                if (!isMiBandPpgSuspended && !isEcgActiveAndHealthy && _isServiceRunning.value && app.bleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
                     if (hrIdleMs > 75000L) {
                         Log.e(TAG, "Heart rate stream stalled for ${hrIdleMs}ms (>75s). Underlying GATT client appears locked. Triggering silent reconnect...")
                         lastHeartRateReceivedTimeMs = now // Reset baseline while reconnect is in progress
@@ -376,7 +446,8 @@ class SleepGuardService : Service() {
                             if (config.enableAudioPlayback) config.audioDurationSeconds else 0
                         ).coerceAtLeast(10)
                         delay((windowSec + 5) * 1000L)
-                        if (_activeCue.value?.cueId == cueId && !_activeCue.value!!.isAcknowledged) {
+                        val currentCue = _activeCue.value
+                        if (currentCue?.cueId == cueId && !currentCue.isAcknowledged) {
                             _activeCue.value = null
                         }
                     }
@@ -397,17 +468,27 @@ class SleepGuardService : Service() {
     private fun stopSleepGuard() {
         epochCollectorJob?.cancel()
         epochCollectorJob = null
+        isMiBandPpgSuspended = false
 
         val app = applicationContext as FlashAlarmApp
-        app.audioAnalyzer.stopAnalysis()
-        app.audioPlayer.stopAudio()
-        app.bleManager.stopVibration()
-        app.bleManager.setHeartRateStreamingMode(false)
-        app.bleManager.disableSensorNotifications()
+        try {
+            app.audioAnalyzer.stopAnalysis()
+            app.audioPlayer.stopAudio()
+            app.bleManager.stopVibration()
+            app.bleManager.setHeartRateStreamingMode(false)
+            app.bleManager.disableSensorNotifications()
+            app.ecgBleManager.disconnect()
+        } catch (e: Exception) {
+            Log.e(TAG, "Error stopping peripherals in stopSleepGuard", e)
+        }
 
         serviceScope.launch {
             if (currentActiveSessionId > 0L) {
-                app.sleepRepository.finalizeSession(currentActiveSessionId)
+                try {
+                    app.sleepRepository.finalizeSession(currentActiveSessionId)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error finalizing session in DB", e)
+                }
             }
             _isServiceRunning.value = false
             _currentSessionId.value = null
@@ -473,10 +554,18 @@ class SleepGuardService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        epochCollectorJob?.cancel()
+        epochCollectorJob = null
+        isMiBandPpgSuspended = false
+
         try {
             val app = applicationContext as? FlashAlarmApp
+            app?.audioAnalyzer?.stopAnalysis()
+            app?.audioPlayer?.stopAudio()
+            app?.bleManager?.stopVibration()
             app?.bleManager?.setHeartRateStreamingMode(false)
             app?.bleManager?.disableSensorNotifications()
+            app?.ecgBleManager?.disconnect()
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
             }
@@ -485,5 +574,8 @@ class SleepGuardService : Service() {
         }
         serviceScope.cancel()
         _isServiceRunning.value = false
+        _currentSessionId.value = null
+        _liveStaging.value = null
+        _activeCue.value = null
     }
 }
