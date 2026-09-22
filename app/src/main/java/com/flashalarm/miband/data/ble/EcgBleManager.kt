@@ -45,6 +45,7 @@ class EcgBleManager(
         val UUID_CHAR_HR_MEASUREMENT: UUID = UUID.fromString("00002a37-0000-1000-8000-00805f9b34fb")
         val UUID_DESCRIPTOR_CCCD: UUID = UUID.fromString("00002902-0000-1000-8000-00805f9b34fb")
         private const val MAX_RECENT_RR_COUNT = 60
+        private const val ECG_WATCHDOG_TIMEOUT_MS = 7000L
     }
 
     private val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
@@ -57,6 +58,11 @@ class EcgBleManager(
     private var reconnectJob: Job? = null
     private var scanTimeoutJob: Job? = null
     private var isIntentionalDisconnect = false
+
+    @Volatile
+    var lastPacketReceivedTimeMs: Long = 0L
+        private set
+    private var watchdogJob: Job? = null
 
     // State flows
     private val _connectionState = MutableStateFlow(BleConnectionState.DISCONNECTED)
@@ -84,6 +90,46 @@ class EcgBleManager(
     val discoveredDevices: StateFlow<List<DiscoveredBleDevice>> = _discoveredDevices.asStateFlow()
 
     private val rrBuffer = ArrayDeque<Double>(MAX_RECENT_RR_COUNT)
+
+    fun isDataFresh(maxAgeMs: Long = ECG_WATCHDOG_TIMEOUT_MS): Boolean {
+        val lastTime = lastPacketReceivedTimeMs
+        return lastTime > 0L && (System.currentTimeMillis() - lastTime) <= maxAgeMs
+    }
+
+    private fun purgeStaleRrBuffer() {
+        _lastRrMs.value = 0.0
+        synchronized(rrBuffer) {
+            if (rrBuffer.isNotEmpty()) {
+                rrBuffer.clear()
+            }
+            _recentRrList.value = emptyList()
+        }
+    }
+
+    private fun startWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = scope.launch(Dispatchers.IO) {
+            while (isActive && _connectionState.value == BleConnectionState.CONNECTED) {
+                delay(2000L)
+                val now = System.currentTimeMillis()
+                val lastTime = lastPacketReceivedTimeMs
+                // If connected and either no packet received at all for 7s or packet stream stalled for > 7s
+                if (lastTime > 0L && (now - lastTime) > ECG_WATCHDOG_TIMEOUT_MS) {
+                    if (!_isLeadsOff.value || _currentHeartRate.value > 0 || _lastRrMs.value > 0.0) {
+                        Log.w(TAG, "ECG Watchdog triggered: no packet for ${now - lastTime}ms (> ${ECG_WATCHDOG_TIMEOUT_MS}ms). Forcing leads-off & purging stale data.")
+                        _isLeadsOff.value = true
+                        _currentHeartRate.value = 0
+                        purgeStaleRrBuffer()
+                    }
+                }
+            }
+        }
+    }
+
+    private fun stopWatchdog() {
+        watchdogJob?.cancel()
+        watchdogJob = null
+    }
 
     fun setTargetDevice(mac: String, name: String = "FlashAlarm-ECG") {
         targetMac = mac
@@ -224,6 +270,7 @@ class EcgBleManager(
         isIntentionalDisconnect = true
         reconnectJob?.cancel()
         reconnectJob = null
+        stopWatchdog()
         stopScan()
         _connectionState.value = BleConnectionState.DISCONNECTING
 
@@ -236,14 +283,11 @@ class EcgBleManager(
             Log.w(TAG, "Error disconnecting ECG GATT", e)
         }
 
+        lastPacketReceivedTimeMs = 0L
         _connectionState.value = BleConnectionState.DISCONNECTED
         _isLeadsOff.value = false
         _currentHeartRate.value = 0
-        _lastRrMs.value = 0.0
-        synchronized(rrBuffer) {
-            rrBuffer.clear()
-            _recentRrList.value = emptyList()
-        }
+        purgeStaleRrBuffer()
     }
 
     private fun scheduleReconnect() {
@@ -264,11 +308,15 @@ class EcgBleManager(
             if (newState == BluetoothProfile.STATE_CONNECTED && status == BluetoothGatt.GATT_SUCCESS) {
                 _connectionState.value = BleConnectionState.CONNECTED
                 Log.d(TAG, "ECG GATT Connected. Discovering services...")
+                startWatchdog()
                 gatt?.discoverServices()
             } else {
+                stopWatchdog()
+                lastPacketReceivedTimeMs = 0L
                 _connectionState.value = BleConnectionState.DISCONNECTED
                 _isLeadsOff.value = false
                 _currentHeartRate.value = 0
+                purgeStaleRrBuffer()
                 if (bluetoothGatt === gatt) {
                     bluetoothGatt = null
                 }
@@ -338,11 +386,16 @@ class EcgBleManager(
         if (characteristic.uuid != UUID_CHAR_HR_MEASUREMENT) return
 
         val packet = StandardHrPacketParser.parse(data) ?: return
+        lastPacketReceivedTimeMs = System.currentTimeMillis()
 
-        _currentHeartRate.value = packet.heartRateBpm
-        _isLeadsOff.value = packet.isLeadsOff
+        val isLeadsOff = packet.isLeadsOff || packet.heartRateBpm == 0
+        _isLeadsOff.value = isLeadsOff
+        _currentHeartRate.value = if (isLeadsOff) 0 else packet.heartRateBpm
 
-        if (packet.rrIntervalsMs.isNotEmpty()) {
+        if (isLeadsOff) {
+            // Immediately purge stale RR intervals and buffer so UI & algorithms do not retain dirty state
+            purgeStaleRrBuffer()
+        } else if (packet.rrIntervalsMs.isNotEmpty()) {
             synchronized(rrBuffer) {
                 for (rr in packet.rrIntervalsMs) {
                     _lastRrMs.value = rr

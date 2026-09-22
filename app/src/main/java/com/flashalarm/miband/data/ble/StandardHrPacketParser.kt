@@ -29,14 +29,19 @@ object StandardHrPacketParser {
         val flags = data[0].toInt() and 0xFF
         val is16BitHr = (flags and 0x01) != 0
         val contactBits = (flags shr 1) and 0x03
-        val isSensorContactSupported = (contactBits and 0x02) != 0
-        // If contact supported: contactBits == 2 (0b10) means contact not detected (leads-off)
-        // contactBits == 3 (0b11) means contact detected
-        val isLeadsOff = if (isSensorContactSupported) {
-            (contactBits and 0x01) == 0
-        } else {
-            false
-        }
+        // 1. Standard Bluetooth SIG (Bit 2: Support, Bit 1: Contact status)
+        // contactBits == 2 (0b10): Supported, contact NOT detected (Leads-off)
+        // contactBits == 3 (0b11): Supported, contact IS detected (Leads-on)
+        val isSigSupported = (contactBits and 0x02) != 0
+        val isSigLeadsOff = isSigSupported && ((contactBits and 0x01) == 0)
+
+        // 2. Embedded / ESP32 dialect:
+        // Many firmware implementations assign flags = 0x02 (Bit 1 = 1, Bit 2 = 0 -> contactBits = 0b01)
+        // directly as a Leads-Off / Sensor Contact Lost flag.
+        val isEsp32DirectLeadsOff = (contactBits == 0x01)
+
+        val isSensorContactSupported = isSigSupported || isEsp32DirectLeadsOff
+        var isLeadsOff = isSigLeadsOff || isEsp32DirectLeadsOff
 
         val hasEnergyExpended = (flags and 0x08) != 0
         val hasRrIntervals = (flags and 0x10) != 0
@@ -81,12 +86,20 @@ object StandardHrPacketParser {
             }
         }
 
+        // Fail-safe: If heart rate is reported as 0 bpm, treat as leads-off / signal lost
+        if (heartRateBpm == 0) {
+            isLeadsOff = true
+        }
+
+        val effectiveHr = if (isLeadsOff) 0 else heartRateBpm
+        val effectiveRrList = if (isLeadsOff) emptyList() else rrList
+
         return StandardHrPacket(
-            heartRateBpm = heartRateBpm,
+            heartRateBpm = effectiveHr,
             isSensorContactSupported = isSensorContactSupported,
             isLeadsOff = isLeadsOff,
             energyExpendedJoules = energyExpended,
-            rrIntervalsMs = rrList
+            rrIntervalsMs = effectiveRrList
         )
     }
 }

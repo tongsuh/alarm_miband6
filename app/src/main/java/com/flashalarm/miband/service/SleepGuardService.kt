@@ -276,6 +276,21 @@ class SleepGuardService : Service() {
             app.bleManager.enableSensorNotifications()
 
             // 6.5 Failover & Power-Saving State Machine for Dual-Modality
+            // Instant event-driven failover listener for leads-off & zero heart rate
+            launch {
+                app.ecgBleManager.isLeadsOff.collect { leadsOff ->
+                    val currentCfg = app.userPreferencesRepository.cueConfig.value
+                    val dualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+                    if (dualActive && leadsOff && isMiBandPpgSuspended) {
+                        Log.w(TAG, "Instant Failover: ECG Leads-off detected via Flow! Immediately resuming Mi Band optical PPG.")
+                        app.bleManager.setHeartRateStreamingMode(true)
+                        lastHeartRateReceivedTimeMs = System.currentTimeMillis()
+                        isMiBandPpgSuspended = false
+                    }
+                }
+            }
+
+            // Periodic composite health assessment and power-saving watchdog (every 1s)
             launch {
                 while (isActive) {
                     val currentCfg = app.userPreferencesRepository.cueConfig.value
@@ -284,20 +299,25 @@ class SleepGuardService : Service() {
                     if (dualActive && ecgTarget.isNotBlank()) {
                         val isEcgConnected = app.ecgBleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED
                         val isLeadsOff = app.ecgBleManager.isLeadsOff.value
+                        val ecgHr = app.ecgBleManager.currentHeartRate.value
+                        val isEcgFresh = app.ecgBleManager.isDataFresh(6000L)
 
-                        if (isEcgConnected && !isLeadsOff) {
-                            // Primary mode: ECG healthy. Turn OFF Mi Band optical PPG for power saving
+                        // Composite health: Active connection + Leads attached + Valid HR > 0 + Fresh packets within 6s
+                        val isEcgHealthy = isEcgConnected && !isLeadsOff && ecgHr > 0 && isEcgFresh
+
+                        if (isEcgHealthy) {
+                            // Primary mode: ECG fully healthy. Turn OFF Mi Band optical PPG for power saving
                             if (!isMiBandPpgSuspended) {
-                                Log.d(TAG, "ECG is healthy and active. Suspending Mi Band PPG for power saving.")
+                                Log.d(TAG, "ECG healthy & streaming ($ecgHr bpm). Suspending Mi Band PPG for power saving.")
                                 app.bleManager.setHeartRateStreamingMode(false)
                                 isMiBandPpgSuspended = true
                             }
                         } else {
-                            // Failover mode: Leads off or ECG disconnected. Turn ON Mi Band optical PPG fallback!
+                            // Failover mode: Leads off, zero HR, data stalled, or disconnected. Resume Mi Band PPG immediately!
                             if (isMiBandPpgSuspended) {
-                                Log.w(TAG, "ECG leads off or disconnected! Triggering Failover: Resuming Mi Band PPG fallback.")
+                                Log.w(TAG, "ECG degraded (conn=$isEcgConnected, leadsOff=$isLeadsOff, hr=$ecgHr, fresh=$isEcgFresh). Failover to Mi Band PPG!")
                                 app.bleManager.setHeartRateStreamingMode(true)
-                                lastHeartRateReceivedTimeMs = System.currentTimeMillis() // Reset baseline so watchdog gives time to resume
+                                lastHeartRateReceivedTimeMs = System.currentTimeMillis()
                                 isMiBandPpgSuspended = false
                             }
                         }
@@ -310,7 +330,7 @@ class SleepGuardService : Service() {
                             isMiBandPpgSuspended = false
                         }
                     }
-                    delay(3000L)
+                    delay(1000L)
                 }
             }
 
@@ -348,7 +368,9 @@ class SleepGuardService : Service() {
                 val isDualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
                 val isEcgActiveAndHealthy = isDualActive &&
                         app.ecgBleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED &&
-                        !app.ecgBleManager.isLeadsOff.value
+                        !app.ecgBleManager.isLeadsOff.value &&
+                        app.ecgBleManager.currentHeartRate.value > 0 &&
+                        app.ecgBleManager.isDataFresh(6000L)
 
                 val isHrFresh = lastHeartRateReceivedTimeMs > 0L && (now - lastHeartRateReceivedTimeMs) < 45000L
                 val ecgHr = app.ecgBleManager.currentHeartRate.value
