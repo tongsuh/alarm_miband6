@@ -59,6 +59,10 @@ class MultiModalRemEngine(
         remHrvFeatureExtractor.pushMotion(actG, timestampMs)
     }
 
+    fun onLeadsOff() {
+        remHrvFeatureExtractor.onLeadsOff()
+    }
+
     fun startSession(startTimeMs: Long = System.currentTimeMillis()) {
         sessionStartTimeMs = startTimeMs
         sleepOnsetDetectedTimeMs = 0L

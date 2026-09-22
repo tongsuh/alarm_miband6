@@ -111,6 +111,11 @@ class RemHrvFeatureExtractor {
             motionMax = motionMax
         )
 
+        // Enforce temporal continuity: if a gap is detected, discard stale buffer
+        if (buffer.isNotEmpty() && epoch.epochIndex != buffer.last().epochIndex + 1L) {
+            buffer.clear()
+        }
+
         buffer.addLast(epoch)
         if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
 
@@ -127,6 +132,9 @@ class RemHrvFeatureExtractor {
             epochStartTimeMs = timestampMs
 
             if (epoch != null) {
+                if (buffer.isNotEmpty() && epoch.epochIndex != buffer.last().epochIndex + 1L) {
+                    buffer.clear()
+                }
                 buffer.addLast(epoch)
                 if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
                 if (buffer.size == WINDOW_SIZE) return extractFeatures()
@@ -151,11 +159,26 @@ class RemHrvFeatureExtractor {
         epochStartTimeMs = 0L
 
         if (epoch != null) {
+            // Check for temporal gap (e.g. leads-off pause / missed epochs)
+            if (buffer.isNotEmpty() && epoch.epochIndex != buffer.last().epochIndex + 1L) {
+                buffer.clear()
+            }
             buffer.addLast(epoch)
             if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
             if (buffer.size == WINDOW_SIZE) return extractFeatures()
         }
         return null
+    }
+
+    /**
+     * Immediate reset when physical leads-off is detected to prevent dirty data or temporal gap residue.
+     */
+    @Synchronized
+    fun onLeadsOff() {
+        currentEpochRrs.clear()
+        currentEpochMotions.clear()
+        epochStartTimeMs = 0L
+        buffer.clear()
     }
 
     private fun completeEpoch(epochIdx: Long): EpochRawData? {

@@ -107,6 +107,10 @@ fun UnifiedSettingsDialog(
 
     var selectedTab by remember { mutableIntStateOf(0) }
     var config by remember { mutableStateOf(initialConfig) }
+
+    LaunchedEffect(initialConfig) {
+        config = initialConfig
+    }
     var isTestingAudio by remember { mutableStateOf(false) }
     var isTestingVibration by remember { mutableStateOf(false) }
     var newProtocolEnabled by remember { mutableStateOf(use2021Protocol) }
@@ -928,7 +932,12 @@ fun UnifiedSettingsDialog(
                                     horizontalArrangement = Arrangement.SpaceBetween
                                 ) {
                                     Text("单次耳语时长", fontSize = 12.sp, color = DarkTextSecondary)
-                                    Text("${config.audioDurationSeconds} 秒", fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                                    val durText = if (config.audioDurationSeconds >= 60) {
+                                        "${config.audioDurationSeconds / 60}分${config.audioDurationSeconds % 60}秒"
+                                    } else {
+                                        "${config.audioDurationSeconds} 秒"
+                                    }
+                                    Text(durText, fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
                                 }
                                 Slider(
                                     value = config.audioDurationSeconds.toFloat(),
@@ -937,8 +946,7 @@ fun UnifiedSettingsDialog(
                                         config = updated
                                         onSaveConfig(updated)
                                     },
-                                    valueRange = 5f..30f,
-                                    steps = 5,
+                                    valueRange = 5f..300f,
                                     colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
                                 )
 

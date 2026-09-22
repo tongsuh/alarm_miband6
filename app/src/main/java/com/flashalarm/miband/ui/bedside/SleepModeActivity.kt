@@ -147,6 +147,13 @@ fun SleepModeScreen(
     val liveStaging by SleepGuardService.liveStaging.collectAsState()
     val activeCue by SleepGuardService.activeCue.collectAsState()
 
+    val cueConfig by app.userPreferencesRepository.cueConfig.collectAsState()
+    val ecgBleManager = app.ecgBleManager
+    val ecgConnectionState by ecgBleManager.connectionState.collectAsState()
+    val ecgHr by ecgBleManager.currentHeartRate.collectAsState()
+    val isLeadsOff by ecgBleManager.isLeadsOff.collectAsState()
+    val ecgLastRr by ecgBleManager.lastRrMs.collectAsState()
+
     var currentTimeStr by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
     var isAwakeBrightness by remember { mutableStateOf(false) }
@@ -272,8 +279,16 @@ fun SleepModeScreen(
             Spacer(modifier = Modifier.height(24.dp))
 
             // Real-time sensor readout chips
+            val isDualActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+            val isEcgValid = isDualActive &&
+                    ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED &&
+                    !isLeadsOff &&
+                    ecgHr > 0
+
+            val displayHr = if (isEcgValid) ecgHr else metrics.heartRateBpm
+
             Row(
-                horizontalArrangement = Arrangement.spacedBy(20.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 // Heart Rate
@@ -286,10 +301,28 @@ fun SleepModeScreen(
                     )
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
-                        text = if (metrics.heartRateBpm > 0) "${metrics.heartRateBpm} bpm" else "--",
+                        text = if (displayHr > 0) {
+                            if (isEcgValid) "$displayHr bpm 🫀" else "$displayHr bpm"
+                        } else if (isDualActive && isLeadsOff) {
+                            "⚠️导联脱落"
+                        } else {
+                            "--"
+                        },
                         fontSize = 14.sp,
-                        color = DarkTextSecondary
+                        color = if (isDualActive && isLeadsOff) Color(0xFFF59E0B) else DarkTextSecondary
                     )
+                }
+
+                // If ECG R-R is valid, display live R-R ms
+                if (isEcgValid && ecgLastRr > 0.0) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = "逐搏 %.0fms".format(ecgLastRr),
+                            fontSize = 12.sp,
+                            color = GoldDream.copy(alpha = 0.85f),
+                            fontFamily = FontFamily.Monospace
+                        )
+                    }
                 }
 
                 // Wrist Movement

@@ -200,7 +200,7 @@ fun HomeScreen(
                 onDisconnectClick = { bleManager.disconnect() }
             )
 
-            if (cueConfig.engineMode == RemEngineMode.AD8232_DUAL || cueConfig.enableAd8232Ecg) {
+            if (cueConfig.engineMode == RemEngineMode.AD8232_DUAL) {
                 Spacer(modifier = Modifier.height(14.dp))
                 EcgDeviceStatusCard(
                     connectionState = ecgConnectionState,
@@ -208,6 +208,7 @@ fun HomeScreen(
                     heartRateBpm = ecgHr,
                     lastRrMs = ecgLastRr,
                     savedMac = cueConfig.ad8232MacAddress,
+                    isServiceRunning = isServiceRunning,
                     onConnectClick = {
                         val mac = cueConfig.ad8232MacAddress
                         if (mac.isBlank()) {
@@ -228,6 +229,7 @@ fun HomeScreen(
                 cueConfig = cueConfig,
                 connectionState = connectionState,
                 isTestingAudio = isTestingAudio,
+                isServiceRunning = isServiceRunning,
                 onConfigChange = { updated ->
                     prefs.updateCueConfig(updated)
                     app.remEngine.updateConfig(updated)
@@ -609,6 +611,7 @@ private fun DreamCueConfigCard(
     cueConfig: DreamCueConfig,
     connectionState: BleConnectionState,
     isTestingAudio: Boolean,
+    isServiceRunning: Boolean = false,
     onConfigChange: (DreamCueConfig) -> Unit,
     onOpenVibrationStudio: () -> Unit,
     onPickAudioFile: () -> Unit,
@@ -842,21 +845,39 @@ private fun DreamCueConfigCard(
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Text("入睡后深睡保护期时长", fontSize = 12.sp, color = DarkTextSecondary)
-                Text("%.1f 小时".format(cueConfig.sleepOnsetProtectionHours), fontSize = 12.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                Text(
+                    "%.1f 小时".format(cueConfig.sleepOnsetProtectionHours),
+                    fontSize = 12.sp,
+                    color = if (isServiceRunning) DarkTextTertiary else GoldDream,
+                    fontWeight = FontWeight.Bold
+                )
             }
             Slider(
                 value = cueConfig.sleepOnsetProtectionHours,
                 onValueChange = { onConfigChange(cueConfig.copy(sleepOnsetProtectionHours = (it * 2).toInt() / 2.0f)) },
                 valueRange = 1.0f..4.5f,
                 steps = 6,
-                colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+                enabled = !isServiceRunning,
+                colors = SliderDefaults.colors(
+                    thumbColor = if (isServiceRunning) DarkTextTertiary else GoldDream,
+                    activeTrackColor = if (isServiceRunning) DarkTextTertiary.copy(alpha = 0.5f) else GoldDream
+                )
             )
-            Text(
-                text = "💡 入睡识别后前 %.1f 小时保持静默，保护深度睡眠；保护期过后触梦雷达全程开启，直至手动结束。".format(cueConfig.sleepOnsetProtectionHours),
-                fontSize = 11.sp,
-                color = DarkTextTertiary,
-                modifier = Modifier.padding(bottom = 10.dp)
-            )
+            if (isServiceRunning) {
+                Text(
+                    text = "🔒 睡眠守护运行中已锁定深睡保护期时长，避免破坏分期相对时序。",
+                    fontSize = 11.sp,
+                    color = MiBandCyan,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+            } else {
+                Text(
+                    text = "💡 入睡识别后前 %.1f 小时保持静默，保护深度睡眠；保护期过后触梦雷达全程开启，直至手动结束。".format(cueConfig.sleepOnsetProtectionHours),
+                    fontSize = 11.sp,
+                    color = DarkTextTertiary,
+                    modifier = Modifier.padding(bottom = 10.dp)
+                )
+            }
 
             // Cooldown Interval
             Row(
@@ -896,7 +917,37 @@ private fun DreamCueConfigCard(
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- Section 4: Detection Engine Selection ---
-            Text("核心做梦期判决引擎", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("核心做梦期判决引擎", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                if (isServiceRunning) {
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(Color(0xFF334155))
+                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                    ) {
+                        Text(
+                            text = "🔒 运行中已锁定",
+                            fontSize = 10.sp,
+                            color = GoldDream,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                }
+            }
+            if (isServiceRunning) {
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = "当前正在睡眠守护中。为保证时序特征与状态机连续性，主引擎不可热切换。如需更换，请先停止守护。",
+                    fontSize = 10.sp,
+                    color = DarkTextTertiary,
+                    lineHeight = 14.sp
+                )
+            }
             Spacer(modifier = Modifier.height(8.dp))
 
             // Option 1: AD8232 Dual Modality (Clinical Grade PAAWS R2)
@@ -905,14 +956,25 @@ private fun DreamCueConfigCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(12.dp))
-                    .background(if (isDualSelected) GoldDream.copy(alpha = 0.15f) else DarkSurface)
-                    .border(1.dp, if (isDualSelected) GoldDream else DarkBorder, RoundedCornerShape(12.dp))
+                    .background(
+                        if (isDualSelected) GoldDream.copy(alpha = 0.15f)
+                        else if (isServiceRunning) DarkSurface.copy(alpha = 0.5f) else DarkSurface
+                    )
+                    .border(
+                        1.dp,
+                        if (isDualSelected) GoldDream else DarkBorder,
+                        RoundedCornerShape(12.dp)
+                    )
                     .clickable {
-                        val updated = cueConfig.copy(
-                            engineMode = RemEngineMode.AD8232_DUAL,
-                            enableAd8232Ecg = true
-                        )
-                        onConfigChange(updated)
+                        if (isServiceRunning) {
+                            Toast.makeText(context, "当前正在睡眠守护中，主引擎已锁定。如需更换请先停止守护。", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val updated = cueConfig.copy(
+                                engineMode = RemEngineMode.AD8232_DUAL,
+                                enableAd8232Ecg = true
+                            )
+                            onConfigChange(updated)
+                        }
                     }
                     .padding(12.dp)
             ) {
@@ -931,7 +993,7 @@ private fun DreamCueConfigCard(
                                 text = "AD8232 真心电双模态",
                                 fontSize = 13.sp,
                                 fontWeight = if (isDualSelected) FontWeight.Bold else FontWeight.SemiBold,
-                                color = if (isDualSelected) GoldDream else DarkTextPrimary
+                                color = if (isDualSelected) GoldDream else if (isServiceRunning) DarkTextTertiary else DarkTextPrimary
                             )
                             Spacer(modifier = Modifier.width(6.dp))
                             Box(
@@ -970,9 +1032,18 @@ private fun DreamCueConfigCard(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(if (isMlSelected) MiBandCyan.copy(alpha = 0.15f) else DarkSurface)
+                        .background(
+                            if (isMlSelected) MiBandCyan.copy(alpha = 0.15f)
+                            else if (isServiceRunning) DarkSurface.copy(alpha = 0.5f) else DarkSurface
+                        )
                         .border(1.dp, if (isMlSelected) MiBandCyan else DarkBorder, RoundedCornerShape(10.dp))
-                        .clickable { onConfigChange(cueConfig.copy(engineMode = RemEngineMode.ML_MODEL)) }
+                        .clickable {
+                            if (isServiceRunning) {
+                                Toast.makeText(context, "当前正在睡眠守护中，主引擎已锁定。如需更换请先停止守护。", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onConfigChange(cueConfig.copy(engineMode = RemEngineMode.ML_MODEL))
+                            }
+                        }
                         .padding(vertical = 10.dp, horizontal = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -981,7 +1052,7 @@ private fun DreamCueConfigCard(
                             text = "🤖 手环 AI 决策树",
                             fontSize = 12.sp,
                             fontWeight = if (isMlSelected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isMlSelected) MiBandCyan else DarkTextPrimary
+                            color = if (isMlSelected) MiBandCyan else if (isServiceRunning) DarkTextTertiary else DarkTextPrimary
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
@@ -998,9 +1069,18 @@ private fun DreamCueConfigCard(
                     modifier = Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(10.dp))
-                        .background(if (isRuleSelected) AlertPurple.copy(alpha = 0.15f) else DarkSurface)
+                        .background(
+                            if (isRuleSelected) AlertPurple.copy(alpha = 0.15f)
+                            else if (isServiceRunning) DarkSurface.copy(alpha = 0.5f) else DarkSurface
+                        )
                         .border(1.dp, if (isRuleSelected) AlertPurple else DarkBorder, RoundedCornerShape(10.dp))
-                        .clickable { onConfigChange(cueConfig.copy(engineMode = RemEngineMode.RULE_BASED)) }
+                        .clickable {
+                            if (isServiceRunning) {
+                                Toast.makeText(context, "当前正在睡眠守护中，主引擎已锁定。如需更换请先停止守护。", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onConfigChange(cueConfig.copy(engineMode = RemEngineMode.RULE_BASED))
+                            }
+                        }
                         .padding(vertical = 10.dp, horizontal = 8.dp),
                     contentAlignment = Alignment.Center
                 ) {
@@ -1009,7 +1089,7 @@ private fun DreamCueConfigCard(
                             text = "⚙️ 生理规则引擎",
                             fontSize = 12.sp,
                             fontWeight = if (isRuleSelected) FontWeight.Bold else FontWeight.Normal,
-                            color = if (isRuleSelected) AlertPurple else DarkTextPrimary
+                            color = if (isRuleSelected) AlertPurple else if (isServiceRunning) DarkTextTertiary else DarkTextPrimary
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
@@ -1024,90 +1104,263 @@ private fun DreamCueConfigCard(
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- Section 5: REM Trigger Decision Sensitivity & Threshold ---
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("做梦期判决敏锐度与阈值", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
-                val currentLevel = RemSensitivityLevel.fromThreshold(cueConfig.confidenceThreshold)
-                Text(
-                    text = "${currentLevel.title} (%.2f)".format(cueConfig.confidenceThreshold),
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = GoldDream
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // 3-Tier Semantic Preset Cards
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                listOf(
-                    RemSensitivityLevel.HIGH_RECALL,
-                    RemSensitivityLevel.BALANCED,
-                    RemSensitivityLevel.HIGH_PRECISION
-                ).forEach { level ->
-                    val isSelected = RemSensitivityLevel.fromThreshold(cueConfig.confidenceThreshold) == level
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .clip(RoundedCornerShape(10.dp))
-                            .background(if (isSelected) GoldDream.copy(alpha = 0.18f) else DarkSurface)
-                            .border(1.dp, if (isSelected) GoldDream else DarkBorder, RoundedCornerShape(10.dp))
-                            .clickable {
-                                onConfigChange(cueConfig.copy(confidenceThreshold = level.threshold))
-                            }
-                            .padding(vertical = 8.dp, horizontal = 4.dp),
-                        contentAlignment = Alignment.Center
+            when (cueConfig.engineMode) {
+                RemEngineMode.RULE_BASED -> {
+                    // 自适应生理规则引擎专属面板 (不消费概率切分阈值)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("做梦期生理规则自适应准则", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        Box(
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(6.dp))
+                                .background(AlertPurple.copy(alpha = 0.2f))
+                                .border(1.dp, AlertPurple.copy(alpha = 0.4f), RoundedCornerShape(6.dp))
+                                .padding(horizontal = 6.dp, vertical = 2.dp)
+                        ) {
                             Text(
-                                text = level.title,
-                                fontSize = 11.sp,
-                                fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
-                                color = if (isSelected) GoldDream else DarkTextPrimary
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "捕梦 ${level.recallText}",
-                                fontSize = 9.sp,
-                                color = if (isSelected) GoldDream else DarkTextTertiary
-                            )
-                            Text(
-                                text = "确率 ${level.precisionText}",
-                                fontSize = 9.sp,
-                                color = if (isSelected) MiBandCyan else DarkTextTertiary
+                                text = "⚙️ 规则自适应触发",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = AlertPurple
                             )
                         }
                     }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(DarkSurface)
+                            .border(1.dp, AlertPurple.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                            .padding(12.dp)
+                    ) {
+                        Column {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("🛑", fontSize = 14.sp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("骨骼肌完全松弛 (一票否决)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                            }
+                            Text(
+                                text = "手腕动量均值持续低于 0.08g；若检测到翻身或肢体动作，立即中止触梦，杜绝浅眠扰醒。",
+                                fontSize = 10.sp,
+                                color = DarkTextSecondary,
+                                modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 8.dp)
+                            )
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("⚡", fontSize = 14.sp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("自主神经风暴 (动态自适应)", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = AlertPurple)
+                            }
+                            Text(
+                                text = "做梦期交感神经剧烈活动：实时心率较前半夜基线突增 +7%~+11%，或局部心率离散度跳变 ≥ 1.5 bpm 时自动锁定做梦期。",
+                                fontSize = 10.sp,
+                                color = DarkTextSecondary,
+                                modifier = Modifier.padding(start = 20.dp, top = 2.dp, bottom = 8.dp)
+                            )
+
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Text("🌊", fontSize = 14.sp)
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("超日节律与声学先验", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MiBandCyan)
+                            }
+                            Text(
+                                text = "结合 90~110 分钟经典睡眠周期（Ultradian Cycle）及手机呼吸不规则度交叉验证，平滑过滤偶发假阳性。",
+                                fontSize = 10.sp,
+                                color = DarkTextSecondary,
+                                modifier = Modifier.padding(start = 20.dp, top = 2.dp)
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "💡 提示：自适应生理规则引擎完全依据人体自主神经实时波动触发，无须概率切分阈值。若您希望自定义调节置信度门槛，请切换至【真·心电双模态】或【AI 机器学习模型】。",
+                        fontSize = 10.sp,
+                        color = DarkTextTertiary,
+                        lineHeight = 14.sp
+                    )
+                }
+
+                RemEngineMode.ML_MODEL -> {
+                    // 手环 1Hz 光电 AI 决策树置信度切分面板
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("手环 AI 决策树置信度门槛", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        Text(
+                            text = "${(cueConfig.confidenceThreshold * 100).toInt()}% 置信门槛",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MiBandCyan
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 3-Tier Presets for ML Model
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(
+                            Triple(0.40f, "⚡ 敏锐探索", "做梦前兆即提醒"),
+                            Triple(0.55f, "⚖️ 标准均衡", "推荐默认基准"),
+                            Triple(0.70f, "🛡️ 稳健防扰", "极显著时触发")
+                        ).forEach { (th, title, sub) ->
+                            val isSelected = kotlin.math.abs(cueConfig.confidenceThreshold - th) < 0.05f
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) MiBandCyan.copy(alpha = 0.18f) else DarkSurface)
+                                    .border(1.dp, if (isSelected) MiBandCyan else DarkBorder, RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        onConfigChange(cueConfig.copy(confidenceThreshold = th))
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = title,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) MiBandCyan else DarkTextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = sub,
+                                        fontSize = 9.sp,
+                                        color = if (isSelected) MiBandCyan else DarkTextTertiary
+                                    )
+                                    Text(
+                                        text = "门槛 ${(th * 100).toInt()}%",
+                                        fontSize = 9.sp,
+                                        color = if (isSelected) GoldDream else DarkTextTertiary
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Fine-tuning Slider
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("微调 AI 置信度切分线", fontSize = 11.sp, color = DarkTextSecondary)
+                        Text("%.2f".format(cueConfig.confidenceThreshold), fontSize = 11.sp, color = MiBandCyan, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = cueConfig.confidenceThreshold,
+                        onValueChange = { onConfigChange(cueConfig.copy(confidenceThreshold = (it * 100).toInt() / 100.0f)) },
+                        valueRange = 0.30f..0.85f,
+                        colors = SliderDefaults.colors(thumbColor = MiBandCyan, activeTrackColor = MiBandCyan)
+                    )
+                    Text(
+                        text = "💡 提示：手环 AI 模型基于临床脑电金标准数据集训练，该滑块微调 1Hz 光电与体动的后验概率切分线。门槛越低捕梦越敏锐，门槛越高防扰越稳健。",
+                        fontSize = 10.sp,
+                        color = DarkTextTertiary,
+                        lineHeight = 14.sp
+                    )
+                }
+
+                RemEngineMode.AD8232_DUAL -> {
+                    // PAAWS R2 临床心电模型专属面板 (带 ROC 召回率/确率标定)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("做梦期判决敏锐度与阈值", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        val currentLevel = RemSensitivityLevel.fromThreshold(cueConfig.confidenceThreshold)
+                        Text(
+                            text = "${currentLevel.title} (%.2f)".format(cueConfig.confidenceThreshold),
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = GoldDream
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 3-Tier Semantic Preset Cards
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(
+                            RemSensitivityLevel.HIGH_RECALL,
+                            RemSensitivityLevel.BALANCED,
+                            RemSensitivityLevel.HIGH_PRECISION
+                        ).forEach { level ->
+                            val isSelected = RemSensitivityLevel.fromThreshold(cueConfig.confidenceThreshold) == level
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) GoldDream.copy(alpha = 0.18f) else DarkSurface)
+                                    .border(1.dp, if (isSelected) GoldDream else DarkBorder, RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        onConfigChange(cueConfig.copy(confidenceThreshold = level.threshold))
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = level.title,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) GoldDream else DarkTextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = "捕梦 ${level.recallText}",
+                                        fontSize = 9.sp,
+                                        color = if (isSelected) GoldDream else DarkTextTertiary
+                                    )
+                                    Text(
+                                        text = "确率 ${level.precisionText}",
+                                        fontSize = 9.sp,
+                                        color = if (isSelected) MiBandCyan else DarkTextTertiary
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Expert Fine-tuning Slider
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("微调概率阈值 (触梦触发线)", fontSize = 11.sp, color = DarkTextSecondary)
+                        Text("%.2f".format(cueConfig.confidenceThreshold), fontSize = 11.sp, color = GoldDream, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = cueConfig.confidenceThreshold,
+                        onValueChange = { onConfigChange(cueConfig.copy(confidenceThreshold = (it * 100).toInt() / 100.0f)) },
+                        valueRange = 0.30f..0.85f,
+                        colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
+                    )
+                    Text(
+                        text = "💡 判定阈值是 PAAWS R2 临床心电模型的概率切分线。设为 0.40 时只要有做梦前兆即触梦提醒（捕梦率 ~85%）；设为 0.70 时仅在做梦特征极其显著时触发（确率 ~62%），杜绝深睡被误扰醒。",
+                        fontSize = 10.sp,
+                        color = DarkTextTertiary,
+                        lineHeight = 14.sp
+                    )
                 }
             }
-
-            Spacer(modifier = Modifier.height(10.dp))
-
-            // Expert Fine-tuning Slider
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text("微调概率阈值 (触梦触发线)", fontSize = 11.sp, color = DarkTextSecondary)
-                Text("%.2f".format(cueConfig.confidenceThreshold), fontSize = 11.sp, color = GoldDream, fontWeight = FontWeight.Bold)
-            }
-            Slider(
-                value = cueConfig.confidenceThreshold,
-                onValueChange = { onConfigChange(cueConfig.copy(confidenceThreshold = (it * 100).toInt() / 100.0f)) },
-                valueRange = 0.30f..0.85f,
-                colors = SliderDefaults.colors(thumbColor = GoldDream, activeTrackColor = GoldDream)
-            )
-            Text(
-                text = "💡 判定阈值是模型做梦期概率的切分线。设为 0.40 时只要有做梦前兆即触梦提醒（捕梦率 ~85%）；设为 0.70 时仅在做梦特征极其显著时触发（确率 ~62%），杜绝深睡被误扰醒。",
-                fontSize = 10.sp,
-                color = DarkTextTertiary,
-                lineHeight = 14.sp
-            )
         }
     }
 }
@@ -1190,10 +1443,12 @@ private fun EcgDeviceStatusCard(
     heartRateBpm: Int,
     lastRrMs: Double,
     savedMac: String,
+    isServiceRunning: Boolean = false,
     onConnectClick: () -> Unit,
     onPairClick: () -> Unit,
     onDisconnectClick: () -> Unit
 ) {
+    val context = LocalContext.current
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -1304,7 +1559,13 @@ private fun EcgDeviceStatusCard(
             ) {
                 if (connectionState != BleConnectionState.CONNECTED) {
                     Button(
-                        onClick = onConnectClick,
+                        onClick = {
+                            if (isServiceRunning) {
+                                Toast.makeText(context, "守护运行中不可连接或重配外设，请先停止睡眠守护", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onConnectClick()
+                            }
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(42.dp),
@@ -1320,7 +1581,13 @@ private fun EcgDeviceStatusCard(
                     }
                 } else {
                     OutlinedButton(
-                        onClick = onDisconnectClick,
+                        onClick = {
+                            if (isServiceRunning) {
+                                Toast.makeText(context, "守护运行中不可断开心电外设，请先停止睡眠守护", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onDisconnectClick()
+                            }
+                        },
                         modifier = Modifier
                             .weight(1f)
                             .height(42.dp),
@@ -1331,7 +1598,13 @@ private fun EcgDeviceStatusCard(
                 }
 
                 OutlinedButton(
-                    onClick = onPairClick,
+                    onClick = {
+                        if (isServiceRunning) {
+                            Toast.makeText(context, "守护运行中不可重新配对外设，请先停止睡眠守护", Toast.LENGTH_SHORT).show()
+                        } else {
+                            onPairClick()
+                        }
+                    },
                     modifier = Modifier
                         .weight(1f)
                         .height(42.dp),

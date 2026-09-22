@@ -281,11 +281,15 @@ class SleepGuardService : Service() {
                 app.ecgBleManager.isLeadsOff.collect { leadsOff ->
                     val currentCfg = app.userPreferencesRepository.cueConfig.value
                     val dualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
-                    if (dualActive && leadsOff && isMiBandPpgSuspended) {
-                        Log.w(TAG, "Instant Failover: ECG Leads-off detected via Flow! Immediately resuming Mi Band optical PPG.")
-                        app.bleManager.setHeartRateStreamingMode(true)
-                        lastHeartRateReceivedTimeMs = System.currentTimeMillis()
-                        isMiBandPpgSuspended = false
+                    if (dualActive && leadsOff) {
+                        // Immediately notify remEngine to purge temporal gap residues & reset sliding window
+                        app.remEngine.onLeadsOff()
+                        if (isMiBandPpgSuspended) {
+                            Log.w(TAG, "Instant Failover: ECG Leads-off detected via Flow! Immediately resuming Mi Band optical PPG.")
+                            app.bleManager.setHeartRateStreamingMode(true)
+                            lastHeartRateReceivedTimeMs = System.currentTimeMillis()
+                            isMiBandPpgSuspended = false
+                        }
                     }
                 }
             }
