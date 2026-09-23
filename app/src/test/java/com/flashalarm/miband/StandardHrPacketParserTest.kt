@@ -31,14 +31,28 @@ class StandardHrPacketParserTest {
 
     @Test
     fun `test SIG standard flags 0x04 contact supported not detected leads off`() {
-        // SIG Standard: Bit 2 = 1, Bit 1 = 0 -> flags = 0x04 (contact not detected)
+        // SIG Standard: Bit 2 = 1, Bit 1 = 0 -> flags = 0x04 (contact supported, contact not detected = leads off)
         val raw = byteArrayOf(0x04, 0x00)
         val packet = StandardHrPacketParser.parse(raw)
 
         assertNotNull(packet)
-        assertTrue(packet!!.isSensorContactSupported)
-        assertTrue(packet.isLeadsOff)
+        assertTrue("Flags 0x04 must indicate sensor contact supported", packet!!.isSensorContactSupported)
+        assertTrue("Flags 0x04 must be parsed as leads-off", packet.isLeadsOff)
         assertEquals(0, packet.heartRateBpm)
+        assertTrue("RR intervals must be empty when leads-off", packet.rrIntervalsMs.isEmpty())
+    }
+
+    @Test
+    fun `test SIG standard flags 0x14 leads off with RR flag still marks leads off and empties RR`() {
+        // Flags = 0x14: Bit 4 = 1 (RR present), Bit 2 = 1 (Contact supported), Bit 1 = 0 (Leads off)
+        val raw = byteArrayOf(0x14, 0x00, 0x33, 0x03)
+        val packet = StandardHrPacketParser.parse(raw)
+
+        assertNotNull(packet)
+        assertTrue("Flags 0x14 must indicate sensor contact supported", packet!!.isSensorContactSupported)
+        assertTrue("Flags 0x14 must be parsed as leads-off", packet.isLeadsOff)
+        assertEquals(0, packet.heartRateBpm)
+        assertTrue("RR intervals must be empty when leads-off", packet.rrIntervalsMs.isEmpty())
     }
 
     @Test

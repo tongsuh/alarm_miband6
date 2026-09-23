@@ -47,6 +47,17 @@ class MultiModalRemEngine(
     private val remHrvFeatureExtractor = RemHrvFeatureExtractor()
     private var sessionEpochCounter: Int = 0
 
+    var isShadowPreWarming: Boolean = false
+        private set
+
+    fun setShadowPreWarming(warming: Boolean) {
+        isShadowPreWarming = warming
+    }
+
+    fun isHrvBufferFull(): Boolean = remHrvFeatureExtractor.isBufferFull()
+
+    fun getHrvBufferSize(): Int = remHrvFeatureExtractor.getBufferSize()
+
     fun updateConfig(config: DreamCueConfig) {
         this.cueConfig = config
     }
@@ -59,8 +70,8 @@ class MultiModalRemEngine(
         remHrvFeatureExtractor.pushMotion(actG, timestampMs)
     }
 
-    fun onLeadsOff() {
-        remHrvFeatureExtractor.onLeadsOff()
+    fun onLeadsOff(confirmed: Boolean = false) {
+        remHrvFeatureExtractor.onLeadsOff(confirmed)
     }
 
     fun startSession(startTimeMs: Long = System.currentTimeMillis()) {
@@ -69,6 +80,7 @@ class MultiModalRemEngine(
         isSleepOnsetDetected = false
         sustainedStillnessEpochs = 0
         lastCueTriggerTimeMs = 0L
+        isShadowPreWarming = false
         shortTermHeartRates.clear()
         longTermHeartRates.clear()
         recentActigraphy.clear()
@@ -95,6 +107,7 @@ class MultiModalRemEngine(
      * @param currentTimeMs Timestamp of evaluation
      * @param peakActigraphy Peak wrist acceleration spike in current 30s epoch (g)
      * @param intraEpochHrStdDev Standard deviation of ~30 1Hz heart rate readings within current epoch
+     * @param isEcgPrimary true if AD8232 is fully healthy and in ECG_PRIMARY mode
      */
     fun evaluateEpoch(
         heartRate: Int,
@@ -103,7 +116,8 @@ class MultiModalRemEngine(
         isAudioReliable: Boolean = false,
         currentTimeMs: Long = System.currentTimeMillis(),
         peakActigraphy: Float = actigraphyMagnitude,
-        intraEpochHrStdDev: Float = 0.0f
+        intraEpochHrStdDev: Float = 0.0f,
+        isEcgPrimary: Boolean = true
     ): RemStagingResult {
         // 1. Maintain sliding windows
         if (heartRate in 36..219) {
@@ -274,6 +288,9 @@ class MultiModalRemEngine(
         } else null
 
         // 7. Staging Decision & 3-Epoch Temporal Hysteresis Filter
+        // Option 1: PAAWS R2 True-HRV model is active in dual mode when ECG is primary and not shadow pre-warming
+        val isPaawsActive = isDualEcgMode && hrvRemProbability != null && !isShadowPreWarming && isEcgPrimary
+
         // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
         val isAutonomicSurge = (hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
                 (hrSurgePercent >= 0.11f) ||
@@ -285,20 +302,22 @@ class MultiModalRemEngine(
         if (isSustainedAwake) {
             tentativeStage = SleepStage.AWAKE
             tentativeRemConfidence = 0.0f
-        } else if (isDualEcgMode && hrvRemProbability != null) {
+        } else if (isPaawsActive) {
             // Option 1: PAAWS R2 True-HRV + Actigraphy Dual-Modality Decision Path (141 subjects ground truth)
-            if (hrvRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
+            val prob = hrvRemProbability!!
+            if (prob >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
                 tentativeStage = SleepStage.REM
-                tentativeRemConfidence = hrvRemProbability
+                tentativeRemConfidence = prob
             } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
                 tentativeStage = SleepStage.DEEP
                 tentativeRemConfidence = 0.0f
             } else {
                 tentativeStage = SleepStage.LIGHT
-                tentativeRemConfidence = hrvRemProbability * 0.3f
+                tentativeRemConfidence = prob * 0.3f
             }
-        } else if (isMlMode && mlRemProbability != null) {
-            // Option 2: AI Machine Learning Decision Path (Trained on PhysioNet Sleep-Accel)
+        } else if ((isMlMode || isDualEcgMode) && mlRemProbability != null) {
+            // Option 2: AI Machine Learning Decision Path (Mi Band 21-dim tree model)
+            // Primary path for ML_MODEL mode, and Hot-Standby Failover for AD8232_DUAL mode!
             if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.60f) {
                 tentativeStage = SleepStage.REM
                 tentativeRemConfidence = mlRemProbability
@@ -310,7 +329,7 @@ class MultiModalRemEngine(
                 tentativeRemConfidence = mlRemProbability * 0.3f
             }
         } else if (atoniaScore > 0.70f) {
-            // Heuristic Rule Decision Path (or Failover fallback)
+            // Option 3: Heuristic Rule Decision Path (Fallback when ML is unavailable)
             if (isAutonomicSurge) {
                 tentativeStage = SleepStage.REM
 
@@ -413,8 +432,10 @@ class MultiModalRemEngine(
 
         val triggerReason = when {
             shouldTrigger -> {
-                if (isDualEcgMode && hrvRemProbability != null) {
+                if (isPaawsActive) {
                     "PAAWS R2 真心电双模态命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                } else if (isDualEcgMode && mlRemProbability != null) {
+                    "手环AI决策树(双模态热备接管)命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else if (isMlMode && mlRemProbability != null) {
                     "AI决策树模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else {

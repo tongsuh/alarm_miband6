@@ -16,7 +16,8 @@
  * Protocol:
  *   - Standard Bluetooth SIG Heart Rate Service (0x180D)
  *   - Heart Rate Measurement Characteristic (0x2A37)
- *   - Flags 0x10 (Bit 4 = 1): Sends uint8 HR + 16-bit millisecond R-R intervals
+ *   - Normal Beat: Flags 0x16 (Bit 4 = 1 RR present, Bit 2 = 1 Contact supported, Bit 1 = 1 Contact detected)
+ *   - Leads-Off: Flags 0x04 (Bit 2 = 1 Contact supported, Bit 1 = 0 Contact not detected), HR = 0
  * 
  * Algorithm:
  *   - Real-time Pan-Tompkins QRS Detection (250 Hz sampling)
@@ -106,7 +107,7 @@ void setupBle() {
     pAdvertising->addServiceUUID(SERVICE_UUID_HEART_RATE);
     pAdvertising->setScanResponse(true);
     pAdvertising->setMinPreferred(0x06);
-    pAdvertising->setMinPreferred(0x12);
+    pAdvertising->setMaxPreferred(0x12);
     BLEDevice::startAdvertising();
     Serial.println("[BLE] Heart Rate Service Advertising started.");
 }
@@ -126,16 +127,50 @@ void setup() {
 }
 
 void loop() {
-    static unsigned long next_sample_us = 0;
-    unsigned long now_us = micros();
+    // Handle BLE reconnection state
+    if (!deviceConnected && oldDeviceConnected) {
+        delay(200);
+        pServer->startAdvertising();
+        oldDeviceConnected = deviceConnected;
+    }
+    if (deviceConnected && !oldDeviceConnected) {
+        oldDeviceConnected = deviceConnected;
+    }
 
     // Check leads off status
     bool leads_off = (digitalRead(PIN_LEADS_OFF_P) == HIGH || digitalRead(PIN_LEADS_OFF_M) == HIGH);
     if (leads_off) {
         // Electrodes detached or bad skin contact
+        last_r_peak_time_ms = 0;
+        samples_since_last_beat = 0;
+        mwi_sum = 0.0f;
+        memset(mwi_buf, 0, sizeof(mwi_buf));
+
+        static unsigned long last_leads_off_notify_ms = 0;
+        unsigned long current_time_ms = millis();
+
+        // Actively send periodic (every 1000ms) BLE notification: Flag = 0x04, HR = 0
+        if (deviceConnected && pHrCharacteristic != nullptr) {
+            if (current_time_ms - last_leads_off_notify_ms >= 1000) {
+                last_leads_off_notify_ms = current_time_ms;
+                // Standard BLE Heart Rate Measurement Format (0x2A37):
+                // Byte 0: Flags (0x04 = Bit 2: Sensor Contact Supported, Bit 1: Contact NOT detected = Leads Off)
+                // Byte 1: HR BPM = 0
+                uint8_t packet[2];
+                packet[0] = 0x04;
+                packet[1] = 0x00;
+                pHrCharacteristic->setValue(packet, 2);
+                pHrCharacteristic->notify();
+                Serial.println("[ECG] Leads-Off! Sent 0x04 notification (HR=0).");
+            }
+        }
+
         delay(50);
         return;
     }
+
+    static unsigned long next_sample_us = 0;
+    unsigned long now_us = micros();
 
     // 250 Hz sampling loop (every 4000 microseconds)
     if ((long)(now_us - next_sample_us) >= 0) {
@@ -195,12 +230,12 @@ void loop() {
                 // Transmit via BLE if connected
                 if (deviceConnected && pHrCharacteristic != nullptr) {
                     // Standard BLE Heart Rate Measurement Format (0x2A37):
-                    // Byte 0: Flags (0x10 = UINT8 HR, RR-Intervals present)
+                    // Byte 0: Flags (0x16 = 0x10 RR-Intervals present | 0x04 Contact supported | 0x02 Contact detected)
                     // Byte 1: HR BPM
                     // Byte 2-3: RR Interval (1/1024 seconds as per BLE SIG specification)
                     uint16_t rr_ble_units = (uint16_t)((rr_ms * 1024UL) / 1000UL);
                     uint8_t packet[4];
-                    packet[0] = 0x10; // Bit 4 = 1
+                    packet[0] = 0x16; // Bit 4 = 1 (RR present), Bit 2 = 1 (Contact supported), Bit 1 = 1 (Contact detected)
                     packet[1] = hr_bpm;
                     packet[2] = (uint8_t)(rr_ble_units & 0xFF);
                     packet[3] = (uint8_t)((rr_ble_units >> 8) & 0xFF);
@@ -217,15 +252,5 @@ void loop() {
             peak_noise = 0.125f * mwi_val + 0.875f * peak_noise;
             threshold = peak_noise + 0.25f * (peak_signal - peak_noise);
         }
-    }
-
-    // Handle BLE reconnection state
-    if (!deviceConnected && oldDeviceConnected) {
-        delay(200);
-        pServer->startAdvertising();
-        oldDeviceConnected = deviceConnected;
-    }
-    if (deviceConnected && !oldDeviceConnected) {
-        oldDeviceConnected = deviceConnected;
     }
 }

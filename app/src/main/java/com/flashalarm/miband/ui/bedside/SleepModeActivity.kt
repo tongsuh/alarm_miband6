@@ -148,6 +148,7 @@ fun SleepModeScreen(
     val activeCue by SleepGuardService.activeCue.collectAsState()
 
     val cueConfig by app.userPreferencesRepository.cueConfig.collectAsState()
+    val dualState by SleepGuardService.dualEngineState.collectAsState()
     val ecgBleManager = app.ecgBleManager
     val ecgConnectionState by ecgBleManager.connectionState.collectAsState()
     val ecgHr by ecgBleManager.currentHeartRate.collectAsState()
@@ -280,12 +281,13 @@ fun SleepModeScreen(
 
             // Real-time sensor readout chips
             val isDualActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
-            val isEcgValid = isDualActive &&
+            val isEcgPrimary = isDualActive &&
+                    dualState == SleepGuardService.DualEngineState.ECG_PRIMARY &&
                     ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED &&
                     !isLeadsOff &&
                     ecgHr > 0
 
-            val displayHr = if (isEcgValid) ecgHr else metrics.heartRateBpm
+            val displayHr = if (isEcgPrimary) ecgHr else metrics.heartRateBpm
 
             Row(
                 horizontalArrangement = Arrangement.spacedBy(16.dp),
@@ -302,7 +304,12 @@ fun SleepModeScreen(
                     Spacer(modifier = Modifier.width(6.dp))
                     Text(
                         text = if (displayHr > 0) {
-                            if (isEcgValid) "$displayHr bpm 🫀" else "$displayHr bpm"
+                            when {
+                                isEcgPrimary -> "$displayHr bpm 🫀"
+                                dualState == SleepGuardService.DualEngineState.SHADOW_PREWARMING -> "$displayHr bpm ⏳预热"
+                                dualState == SleepGuardService.DualEngineState.LATCH_BAND -> "$displayHr bpm ⌚手环"
+                                else -> "$displayHr bpm"
+                            }
                         } else if (isDualActive && isLeadsOff) {
                             "⚠️导联脱落"
                         } else {
@@ -314,7 +321,7 @@ fun SleepModeScreen(
                 }
 
                 // If ECG R-R is valid, display live R-R ms
-                if (isEcgValid && ecgLastRr > 0.0) {
+                if (isEcgPrimary && ecgLastRr > 0.0) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = "逐搏 %.0fms".format(ecgLastRr),

@@ -75,6 +75,8 @@ class RemHrvFeatureExtractor {
         currentEpochMotions.add(motionG)
     }
 
+    private var consecutiveSparseEpochs = 0
+
     /**
      * Direct push at the end of an epoch (if synchronized externally).
      * @return 18-element feature array for RemHrvClassifierModel.score(), or null if buffering
@@ -111,9 +113,18 @@ class RemHrvFeatureExtractor {
             motionMax = motionMax
         )
 
-        // Enforce temporal continuity: if a gap is detected, discard stale buffer
-        if (buffer.isNotEmpty() && epoch.epochIndex != buffer.last().epochIndex + 1L) {
-            buffer.clear()
+        // Enforce temporal continuity with short-term gap tolerance:
+        // Gap == 2L: exactly 1 epoch missed -> bridge with prior epoch to prevent clearing buffer
+        // Gap > 2L: substantial disruption (>60s) -> reset buffer
+        if (buffer.isNotEmpty()) {
+            val gap = epoch.epochIndex - buffer.last().epochIndex
+            if (gap == 2L) {
+                val bridgeEpoch = buffer.last().copy(epochIndex = buffer.last().epochIndex + 1L)
+                buffer.addLast(bridgeEpoch)
+                if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
+            } else if (gap > 2L || gap < 1L) {
+                buffer.clear()
+            }
         }
 
         buffer.addLast(epoch)
@@ -132,8 +143,15 @@ class RemHrvFeatureExtractor {
             epochStartTimeMs = timestampMs
 
             if (epoch != null) {
-                if (buffer.isNotEmpty() && epoch.epochIndex != buffer.last().epochIndex + 1L) {
-                    buffer.clear()
+                if (buffer.isNotEmpty()) {
+                    val gap = epoch.epochIndex - buffer.last().epochIndex
+                    if (gap == 2L) {
+                        val bridgeEpoch = buffer.last().copy(epochIndex = buffer.last().epochIndex + 1L)
+                        buffer.addLast(bridgeEpoch)
+                        if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
+                    } else if (gap > 2L || gap < 1L) {
+                        buffer.clear()
+                    }
                 }
                 buffer.addLast(epoch)
                 if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
@@ -159,9 +177,18 @@ class RemHrvFeatureExtractor {
         epochStartTimeMs = 0L
 
         if (epoch != null) {
-            // Check for temporal gap (e.g. leads-off pause / missed epochs)
-            if (buffer.isNotEmpty() && epoch.epochIndex != buffer.last().epochIndex + 1L) {
-                buffer.clear()
+            // Check for temporal continuity with short-term bridge tolerance
+            if (buffer.isNotEmpty()) {
+                val gap = epoch.epochIndex - buffer.last().epochIndex
+                if (gap == 2L) {
+                    // Exactly 1 epoch missed: bridge it with last valid epoch to protect 21-epoch context
+                    val bridgeEpoch = buffer.last().copy(epochIndex = buffer.last().epochIndex + 1L)
+                    buffer.addLast(bridgeEpoch)
+                    if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
+                } else if (gap > 2L || gap < 1L) {
+                    // Severe gap > 1 epoch (>60s) or out-of-order: clear buffer
+                    buffer.clear()
+                }
             }
             buffer.addLast(epoch)
             if (buffer.size > WINDOW_SIZE) buffer.removeFirst()
@@ -171,61 +198,96 @@ class RemHrvFeatureExtractor {
     }
 
     /**
-     * Immediate reset when physical leads-off is detected to prevent dirty data or temporal gap residue.
+     * Signal leads-off event with debouncing support.
+     * @param isConfirmed If true (debounced >= 10-15s), performs complete purge of the 21-epoch buffer.
+     *                    If false (transient 1~2s contact flicker), only clears current raw epoch buffers
+     *                    without destroying the historical 21-epoch rolling window context.
      */
     @Synchronized
-    fun onLeadsOff() {
+    fun onLeadsOff(isConfirmed: Boolean = false) {
         currentEpochRrs.clear()
         currentEpochMotions.clear()
         epochStartTimeMs = 0L
-        buffer.clear()
+        if (isConfirmed) {
+            buffer.clear()
+            consecutiveSparseEpochs = 0
+        }
     }
 
     private fun completeEpoch(epochIdx: Long): EpochRawData? {
-        if (currentEpochRrs.size < 5) return null
-
         val n = currentEpochRrs.size
-        val meanRr = currentEpochRrs.average()
-        if (meanRr <= 0.0) return null
-        val hr = 60000.0 / meanRr
+        if (n >= 3) {
+            consecutiveSparseEpochs = 0
+            val meanRr = currentEpochRrs.average()
+            if (meanRr <= 0.0) return null
+            val hr = 60000.0 / meanRr
 
-        var varSum = 0.0
-        for (rr in currentEpochRrs) varSum += (rr - meanRr).pow(2)
-        val sdnn = sqrt(varSum / n)
+            var varSum = 0.0
+            for (rr in currentEpochRrs) varSum += (rr - meanRr).pow(2)
+            val sdnn = sqrt(varSum / n)
 
-        var diffSqSum = 0.0
-        var count50 = 0
-        for (i in 0 until n - 1) {
-            val diff = currentEpochRrs[i + 1] - currentEpochRrs[i]
-            diffSqSum += diff * diff
-            if (kotlin.math.abs(diff) > 50.0) count50++
+            var diffSqSum = 0.0
+            var count50 = 0
+            for (i in 0 until n - 1) {
+                val diff = currentEpochRrs[i + 1] - currentEpochRrs[i]
+                diffSqSum += diff * diff
+                if (kotlin.math.abs(diff) > 50.0) count50++
+            }
+            val rmssd = if (n > 1) sqrt(diffSqSum / (n - 1)) else 0.0
+            val pnn50 = if (n > 1) (count50.toDouble() / (n - 1)) * 100.0 else 0.0
+            val cvRr = if (meanRr > 0) sdnn / meanRr else 0.0
+
+            minHrTracked = min(minHrTracked, hr)
+            val hrSurge = (hr - minHrTracked) / max(40.0, minHrTracked)
+            val autonomicBalance = sdnn / max(1.0, rmssd)
+
+            val motionMean = if (currentEpochMotions.isNotEmpty()) currentEpochMotions.average() else 0.0
+            val motionMax = if (currentEpochMotions.isNotEmpty()) currentEpochMotions.maxOrNull() ?: 0.0 else 0.0
+
+            updateStats(meanRr, hr, rmssd, sdnn, pnn50, cvRr, autonomicBalance, motionMean, motionMax)
+
+            return EpochRawData(
+                epochIndex = epochIdx,
+                meanRr = meanRr,
+                hr = hr,
+                rmssd = rmssd,
+                sdnn = sdnn,
+                pnn50 = pnn50,
+                cvRr = cvRr,
+                hrSurge = hrSurge,
+                autonomicBalance = autonomicBalance,
+                motionMean = motionMean,
+                motionMax = motionMax
+            )
         }
-        val rmssd = if (n > 1) sqrt(diffSqSum / (n - 1)) else 0.0
-        val pnn50 = if (n > 1) (count50.toDouble() / (n - 1)) * 100.0 else 0.0
-        val cvRr = if (meanRr > 0) sdnn / meanRr else 0.0
 
-        minHrTracked = min(minHrTracked, hr)
-        val hrSurge = (hr - minHrTracked) / max(40.0, minHrTracked)
-        val autonomicBalance = sdnn / max(1.0, rmssd)
+        // Short-term fault tolerance:
+        // If n < 3 (dropped beats or transient silence) and buffer has prior valid data:
+        // Allow forward-fill imputation for up to 1 single isolated epoch
+        if (buffer.isNotEmpty() && consecutiveSparseEpochs < 1) {
+            consecutiveSparseEpochs++
+            val last = buffer.last()
+            val motionMean = if (currentEpochMotions.isNotEmpty()) currentEpochMotions.average() else last.motionMean
+            val motionMax = if (currentEpochMotions.isNotEmpty()) currentEpochMotions.maxOrNull() ?: last.motionMax else last.motionMax
 
-        val motionMean = if (currentEpochMotions.isNotEmpty()) currentEpochMotions.average() else 0.0
-        val motionMax = if (currentEpochMotions.isNotEmpty()) currentEpochMotions.maxOrNull() ?: 0.0 else 0.0
+            return EpochRawData(
+                epochIndex = epochIdx,
+                meanRr = last.meanRr,
+                hr = last.hr,
+                rmssd = last.rmssd,
+                sdnn = last.sdnn,
+                pnn50 = last.pnn50,
+                cvRr = last.cvRr,
+                hrSurge = last.hrSurge,
+                autonomicBalance = last.autonomicBalance,
+                motionMean = motionMean,
+                motionMax = motionMax
+            )
+        }
 
-        updateStats(meanRr, hr, rmssd, sdnn, pnn50, cvRr, autonomicBalance, motionMean, motionMax)
-
-        return EpochRawData(
-            epochIndex = epochIdx,
-            meanRr = meanRr,
-            hr = hr,
-            rmssd = rmssd,
-            sdnn = sdnn,
-            pnn50 = pnn50,
-            cvRr = cvRr,
-            hrSurge = hrSurge,
-            autonomicBalance = autonomicBalance,
-            motionMean = motionMean,
-            motionMax = motionMax
-        )
+        // Multiple consecutive sparse epochs -> signal starved
+        consecutiveSparseEpochs++
+        return null
     }
 
     private fun updateStats(meanRr: Double, hr: Double, rmssd: Double, sdnn: Double, pnn50: Double,
@@ -307,6 +369,7 @@ class RemHrvFeatureExtractor {
         epochStartTimeMs = 0L
         currentEpochIndex = 0L
         buffer.clear()
+        consecutiveSparseEpochs = 0
         statCount = 0
         sumMeanRr = 0.0; sumSqMeanRr = 0.0
         sumHr = 0.0;     sumSqHr = 0.0
@@ -319,4 +382,9 @@ class RemHrvFeatureExtractor {
         sumMotX = 0.0;   sumSqMotX = 0.0
         minHrTracked = 200.0
     }
+
+    @Synchronized
+    fun getBufferSize(): Int = buffer.size
+
+    fun isBufferFull(): Boolean = synchronized(this) { buffer.size >= WINDOW_SIZE }
 }

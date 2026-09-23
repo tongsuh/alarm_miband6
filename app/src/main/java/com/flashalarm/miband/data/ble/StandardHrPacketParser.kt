@@ -28,20 +28,23 @@ object StandardHrPacketParser {
 
         val flags = data[0].toInt() and 0xFF
         val is16BitHr = (flags and 0x01) != 0
-        val contactBits = (flags shr 1) and 0x03
-        // 1. Standard Bluetooth SIG (Bit 2: Support, Bit 1: Contact status)
-        // contactBits == 2 (0b10): Supported, contact NOT detected (Leads-off)
-        // contactBits == 3 (0b11): Supported, contact IS detected (Leads-on)
-        val isSigSupported = (contactBits and 0x02) != 0
-        val isSigLeadsOff = isSigSupported && ((contactBits and 0x01) == 0)
 
-        // 2. Embedded / ESP32 dialect:
-        // Many firmware implementations assign flags = 0x02 (Bit 1 = 1, Bit 2 = 0 -> contactBits = 0b01)
-        // directly as a Leads-Off / Sensor Contact Lost flag.
-        val isEsp32DirectLeadsOff = (contactBits == 0x01)
+        // Bluetooth SIG Heart Rate Service (0x180D) Characteristic 0x2A37:
+        // Bit 1: Sensor Contact Status bit (0 = contact not detected, 1 = contact detected)
+        // Bit 2: Sensor Contact Support bit (0 = feature not supported, 1 = feature supported)
+        //
+        // Evaluated using mask 0x06 (Bits 2 & 1):
+        // 1. Standard Bluetooth SIG:
+        //    Bit 2 = 1, Bit 1 = 0 -> (flags and 0x06) == 0x04: Contact Supported, Contact NOT detected (Leads-Off)
+        //    Bit 2 = 1, Bit 1 = 1 -> (flags and 0x06) == 0x06: Contact Supported, Contact IS detected (Leads-On)
+        // 2. Legacy / Embedded dialect:
+        //    Older custom firmware sent flags = 0x02 (Bit 1 = 1, Bit 2 = 0) directly for Leads-Off.
+        val isSigSupported = (flags and 0x04) != 0
+        val isSigLeadsOff = (flags and 0x06) == 0x04
+        val isLegacyLeadsOff = (flags and 0x06) == 0x02
 
-        val isSensorContactSupported = isSigSupported || isEsp32DirectLeadsOff
-        var isLeadsOff = isSigLeadsOff || isEsp32DirectLeadsOff
+        val isSensorContactSupported = isSigSupported || isLegacyLeadsOff
+        var isLeadsOff = isSigLeadsOff || isLegacyLeadsOff
 
         val hasEnergyExpended = (flags and 0x08) != 0
         val hasRrIntervals = (flags and 0x10) != 0
