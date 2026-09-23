@@ -46,6 +46,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.flashalarm.miband.FlashAlarmApp
 import com.flashalarm.miband.R
+import com.flashalarm.miband.domain.model.DualEngineState
 import com.flashalarm.miband.domain.model.SleepSessionPhase
 import com.flashalarm.miband.service.SleepGuardService
 import com.flashalarm.miband.ui.components.SlideToStopSlider
@@ -282,7 +283,7 @@ fun SleepModeScreen(
             // Real-time sensor readout chips
             val isDualActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
             val isEcgPrimary = isDualActive &&
-                    dualState == SleepGuardService.DualEngineState.ECG_PRIMARY &&
+                    dualState == DualEngineState.ECG_PRIMARY &&
                     ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED &&
                     !isLeadsOff &&
                     ecgHr > 0
@@ -306,8 +307,8 @@ fun SleepModeScreen(
                         text = if (displayHr > 0) {
                             when {
                                 isEcgPrimary -> "$displayHr bpm 🫀"
-                                dualState == SleepGuardService.DualEngineState.SHADOW_PREWARMING -> "$displayHr bpm ⏳预热"
-                                dualState == SleepGuardService.DualEngineState.LATCH_BAND -> "$displayHr bpm ⌚手环"
+                                dualState == DualEngineState.SHADOW_PREWARMING -> "$displayHr bpm ⏳预热"
+                                dualState == DualEngineState.LATCH_BAND -> "$displayHr bpm ⌚手环"
                                 else -> "$displayHr bpm"
                             }
                         } else if (isDualActive && isLeadsOff) {

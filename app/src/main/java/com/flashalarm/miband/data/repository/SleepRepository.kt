@@ -240,6 +240,26 @@ class SleepRepository(
                 }
             }
 
+            // Pass 4: Eliminate isolated 3-epoch (90s) AWAKE clusters embedded inside sleep (Micro-Arousal clusters)
+            for (i in 1 until smoothed.size - 3) {
+                val prev = SleepStage.fromCode(smoothed[i - 1].stage)
+                val curr1 = SleepStage.fromCode(smoothed[i].stage)
+                val curr2 = SleepStage.fromCode(smoothed[i + 1].stage)
+                val curr3 = SleepStage.fromCode(smoothed[i + 2].stage)
+                val next = SleepStage.fromCode(smoothed[i + 3].stage)
+
+                if (curr1 == SleepStage.AWAKE && curr2 == SleepStage.AWAKE && curr3 == SleepStage.AWAKE &&
+                    prev != SleepStage.AWAKE && next != SleepStage.AWAKE
+                ) {
+                    if (smoothed[i].heartRate < 90 && smoothed[i + 1].heartRate < 90 && smoothed[i + 2].heartRate < 90) {
+                        val fallback = if (prev == next) prev else if (prev == SleepStage.REM || next == SleepStage.REM) SleepStage.REM else SleepStage.LIGHT
+                        smoothed[i] = smoothed[i].copy(stage = fallback.code)
+                        smoothed[i + 1] = smoothed[i + 1].copy(stage = fallback.code)
+                        smoothed[i + 2] = smoothed[i + 2].copy(stage = fallback.code)
+                    }
+                }
+            }
+
             return smoothed
         }
     }

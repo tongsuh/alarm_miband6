@@ -38,6 +38,7 @@ class MultiModalRemEngine(
 
     // Movement classification and stage hysteresis state
     private var consecutiveMovingEpochs: Int = 0
+    private var consecutiveSubstantialMovingEpochs: Int = 0
     private var lastEstablishedStage: SleepStage = SleepStage.AWAKE
     private var pendingStage: SleepStage? = null
     private var pendingStageCount: Int = 0
@@ -70,8 +71,8 @@ class MultiModalRemEngine(
         remHrvFeatureExtractor.pushMotion(actG, timestampMs)
     }
 
-    fun onLeadsOff(confirmed: Boolean = false) {
-        remHrvFeatureExtractor.onLeadsOff(confirmed)
+    fun onLeadsOff(isConfirmed: Boolean = false) {
+        remHrvFeatureExtractor.onLeadsOff(isConfirmed = isConfirmed)
     }
 
     fun startSession(startTimeMs: Long = System.currentTimeMillis()) {
@@ -90,6 +91,7 @@ class MultiModalRemEngine(
         bedtimeBaselineHr = 0.0f
         bedtimeSamplesCount = 0
         consecutiveMovingEpochs = 0
+        consecutiveSubstantialMovingEpochs = 0
         lastEstablishedStage = SleepStage.AWAKE
         pendingStage = null
         pendingStageCount = 0
@@ -146,26 +148,36 @@ class MultiModalRemEngine(
         // Atonia score: 1.0 when completely motionless (<0.015g), drops toward 0 when moving
         val atoniaScore = (1.0f - (avgMovement / 0.08f)).coerceIn(0.0f, 1.0f)
 
-        // Movement Classification:
-        // A. Any movement spike (including brief micro-twitch or single rollover):
-        val isAnyMovement = peakActigraphy > 0.18f || actigraphyMagnitude > 0.08f
-        if (isAnyMovement) {
+        // Movement Classification (AASM-aligned):
+        // A. Micro-movements: brief 3-15s isolated twitches or single rollovers
+        val isMicroMovement = peakActigraphy > 0.16f || actigraphyMagnitude > 0.045f
+
+        // B. Substantial movements: continuous physical activity sustained across the 30s epoch
+        val isSubstantialMovement = actigraphyMagnitude >= 0.12f || (peakActigraphy >= 0.32f && actigraphyMagnitude >= 0.06f)
+
+        if (isSubstantialMovement) {
+            consecutiveSubstantialMovingEpochs++
             consecutiveMovingEpochs++
+        } else if (isMicroMovement) {
+            consecutiveMovingEpochs++
+            consecutiveSubstantialMovingEpochs = (consecutiveSubstantialMovingEpochs - 1).coerceAtLeast(0)
         } else {
             consecutiveMovingEpochs = 0
+            consecutiveSubstantialMovingEpochs = 0
         }
 
-        // B. Vigorous waking movement (e.g. sitting up, getting out of bed):
-        // High acceleration (>=0.30g) accompanied by elevated wake heart rate (>=72 bpm or >=20% surge), or extreme movement (>=0.45g)
-        val isVigorousWakeMovement = (actigraphyMagnitude >= 0.30f && (heartRate >= 72 || (deepSleepBaselineHr > 0 && (heartRate - deepSleepBaselineHr) / deepSleepBaselineHr >= 0.20f))) ||
-                actigraphyMagnitude >= 0.45f
+        // C. Vigorous waking movement (e.g. sitting up, getting out of bed):
+        // High sustained epoch acceleration (>=0.28g) accompanied by wake-level heart rate (>=76 bpm or >=22% surge over deep baseline), or intense gross movement (>=0.42g)
+        val hasWakeHrElevation = heartRate >= 76 || (deepSleepBaselineHr > 0 && (heartRate - deepSleepBaselineHr) / deepSleepBaselineHr >= 0.22f)
+        val isVigorousWakeMovement = (actigraphyMagnitude >= 0.28f && hasWakeHrElevation) || actigraphyMagnitude >= 0.42f
 
-        // C. Sustained macroscopic movement across epochs:
+        // D. Sustained macroscopic movement across epochs:
         // Under AASM guidelines, an isolated rollover or postural shift (<15s) in sleep is a movement micro-arousal, NOT Stage Wake.
-        // True awakening requires sustained physical movement across >= 3 epochs (90s), or vigorous waking movement across >= 2 epochs, or high multi-minute average:
-        val isSustainedAwake = (consecutiveMovingEpochs >= 3) ||
+        // True awakening requires sustained physical movement across >= 4 epochs (2 minutes), or vigorous waking movement across >= 2 epochs, or high multi-minute average with wake HR:
+        val isSustainedAwake = (consecutiveSubstantialMovingEpochs >= 4) ||
                 (consecutiveMovingEpochs >= 2 && isVigorousWakeMovement) ||
-                (avgMovement > 0.22f)
+                (avgMovement > 0.20f && hasWakeHrElevation) ||
+                (avgMovement > 0.26f)
 
         // Per user requirement:
         // Micro-movements / normal isolated rollovers DO NOT veto dream cue vibrations! Only sustained awakening vetoes vibration.
@@ -389,6 +401,10 @@ class MultiModalRemEngine(
                 }
                 lastEstablishedStage == SleepStage.REM -> 3
                 tentativeStage == SleepStage.AWAKE -> 3
+                lastEstablishedStage == SleepStage.AWAKE -> {
+                    // Fast recovery from AWAKE when subject is quiet and resting
+                    if (actigraphyMagnitude < 0.04f && peakActigraphy < 0.12f) 1 else 2
+                }
                 else -> 2
             }
 
@@ -406,7 +422,15 @@ class MultiModalRemEngine(
             } else {
                 pendingStage = tentativeStage
                 pendingStageCount = 1
-                determinedStage = lastEstablishedStage
+                if (pendingStageCount >= requiredConfirmEpochs) {
+                    // Fast path for 1-epoch confirmation (e.g. recovering from AWAKE when motionless)
+                    lastEstablishedStage = tentativeStage
+                    pendingStage = null
+                    pendingStageCount = 0
+                    determinedStage = tentativeStage
+                } else {
+                    determinedStage = lastEstablishedStage
+                }
             }
         }
 

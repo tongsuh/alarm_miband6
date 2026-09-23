@@ -339,4 +339,55 @@ class MultiModalRemEngineTest {
         // Must stay in REM, not artificially dragged into AWAKE
         assertEquals("Subsequent epoch must remain REM", SleepStage.REM, nextEpoch.stage)
     }
+
+    @Test
+    fun `test boundary crossing rollover micro-movements across 2 epochs does not trigger AWAKE`() {
+        engine.markSleepOnset(0L)
+        // Establish stable deep baseline
+        for (i in 0 until 10) {
+            engine.evaluateEpoch(heartRate = 54, actigraphyMagnitude = 0.01f, currentTimeMs = 1000L * i)
+        }
+
+        // Epoch 1 of boundary rollover: brief turn peak 0.24g, mean 0.04g, HR 62 bpm
+        val boundaryEpoch1 = engine.evaluateEpoch(
+            heartRate = 62,
+            actigraphyMagnitude = 0.04f,
+            peakActigraphy = 0.24f,
+            currentTimeMs = 15000L
+        )
+        assertTrue("Epoch 1 of boundary rollover must not be AWAKE", boundaryEpoch1.stage != SleepStage.AWAKE)
+
+        // Epoch 2 of boundary rollover: tail of turn peak 0.21g, mean 0.035f, HR 60 bpm
+        val boundaryEpoch2 = engine.evaluateEpoch(
+            heartRate = 60,
+            actigraphyMagnitude = 0.035f,
+            peakActigraphy = 0.21f,
+            currentTimeMs = 45000L
+        )
+        assertTrue("Epoch 2 of boundary rollover must not be AWAKE", boundaryEpoch2.stage != SleepStage.AWAKE)
+    }
+
+    @Test
+    fun `test fast recovery from AWAKE when subject becomes quiet and still`() {
+        engine.markSleepOnset(0L)
+        // Establish baseline
+        for (i in 0 until 10) {
+            engine.evaluateEpoch(heartRate = 55, actigraphyMagnitude = 0.01f, currentTimeMs = 1000L * i)
+        }
+
+        // Trigger genuine sustained awake with 2 epochs of vigorous out-of-bed motion
+        engine.evaluateEpoch(heartRate = 80, actigraphyMagnitude = 0.38f, currentTimeMs = 15000L)
+        val awakeEpoch = engine.evaluateEpoch(heartRate = 82, actigraphyMagnitude = 0.38f, currentTimeMs = 45000L)
+        assertEquals("Sustained vigorous movement must be AWAKE", SleepStage.AWAKE, awakeEpoch.stage)
+
+        // Subject immediately lies back down motionless (actigraphy < 0.04g, peak < 0.12g, HR 56)
+        val recoveredEpoch = engine.evaluateEpoch(
+            heartRate = 56,
+            actigraphyMagnitude = 0.01f,
+            peakActigraphy = 0.02f,
+            currentTimeMs = 75000L
+        )
+        // Fast recovery path should immediately transition out of AWAKE in 1 epoch without 60s sticky delay
+        assertEquals("Should recover to LIGHT on 1st quiet epoch", SleepStage.LIGHT, recoveredEpoch.stage)
+    }
 }

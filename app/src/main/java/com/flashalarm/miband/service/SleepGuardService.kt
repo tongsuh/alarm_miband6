@@ -21,6 +21,7 @@ import androidx.core.content.ContextCompat
 import com.flashalarm.miband.FlashAlarmApp
 import com.flashalarm.miband.MainActivity
 import com.flashalarm.miband.R
+import com.flashalarm.miband.domain.model.DualEngineState
 import com.flashalarm.miband.domain.model.RemStagingResult
 import com.flashalarm.miband.domain.model.SleepSessionPhase
 import kotlinx.coroutines.CoroutineScope
@@ -64,12 +65,6 @@ class SleepGuardService : Service() {
 
         private val _activeCue = MutableStateFlow<ActiveCueState?>(null)
         val activeCue: StateFlow<ActiveCueState?> = _activeCue.asStateFlow()
-
-        enum class DualEngineState {
-            ECG_PRIMARY,       // AD8232 为主，真心电双模态 ML
-            SHADOW_PREWARMING, // 8232 蓝牙重连后在后台静默攒数据预热 (需连续 21 个 Epoch/10.5分钟无异常)
-            LATCH_BAND         // 电极真脱落，单向锁存到手环模式，整夜不再切回 8232
-        }
 
         private val _dualEngineState = MutableStateFlow<DualEngineState?>(null)
         val dualEngineState: StateFlow<DualEngineState?> = _dualEngineState.asStateFlow()
@@ -346,7 +341,7 @@ class SleepGuardService : Service() {
                                 isShadowWarmingUp = true
                                 app.remEngine.setShadowPreWarming(true)
                                 _dualEngineState.value = DualEngineState.SHADOW_PREWARMING
-                                app.remEngine.onLeadsOff(confirmed = false)
+                                app.remEngine.onLeadsOff(isConfirmed = false)
                             }
                         } else {
                             Log.w(TAG, "ECG disconnected! Setting SHADOW_PREWARMING.")

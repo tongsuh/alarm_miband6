@@ -105,12 +105,48 @@ class SleepEpochSmoothingTest {
     }
 
     @Test
-    fun `test genuine sustained AWAKE of 3 or more epochs is preserved`() {
+    fun `test isolated 3-epoch AWAKE cluster with sleep heart rate is smoothed to surrounding stage`() {
         val raw = listOf(
             makeEpoch(SleepStage.LIGHT, index = 0),
             makeEpoch(SleepStage.AWAKE, hr = 85, index = 1),
             makeEpoch(SleepStage.AWAKE, hr = 88, index = 2),
             makeEpoch(SleepStage.AWAKE, hr = 82, index = 3),
+            makeEpoch(SleepStage.LIGHT, index = 4)
+        )
+
+        val smoothed = SleepRepository.smoothEpochs(raw)
+
+        assertEquals(SleepStage.LIGHT.code, smoothed[1].stage)
+        assertEquals(SleepStage.LIGHT.code, smoothed[2].stage)
+        assertEquals(SleepStage.LIGHT.code, smoothed[3].stage)
+    }
+
+    @Test
+    fun `test genuine sustained AWAKE of 4 or more epochs is preserved`() {
+        val raw = listOf(
+            makeEpoch(SleepStage.LIGHT, index = 0),
+            makeEpoch(SleepStage.AWAKE, hr = 85, index = 1),
+            makeEpoch(SleepStage.AWAKE, hr = 88, index = 2),
+            makeEpoch(SleepStage.AWAKE, hr = 82, index = 3),
+            makeEpoch(SleepStage.AWAKE, hr = 80, index = 4),
+            makeEpoch(SleepStage.LIGHT, index = 5)
+        )
+
+        val smoothed = SleepRepository.smoothEpochs(raw)
+
+        assertEquals(SleepStage.AWAKE.code, smoothed[1].stage)
+        assertEquals(SleepStage.AWAKE.code, smoothed[2].stage)
+        assertEquals(SleepStage.AWAKE.code, smoothed[3].stage)
+        assertEquals(SleepStage.AWAKE.code, smoothed[4].stage)
+    }
+
+    @Test
+    fun `test genuine 3-epoch active awakening with elevated heart rate is preserved`() {
+        val raw = listOf(
+            makeEpoch(SleepStage.LIGHT, index = 0),
+            makeEpoch(SleepStage.AWAKE, hr = 95, index = 1),
+            makeEpoch(SleepStage.AWAKE, hr = 98, index = 2),
+            makeEpoch(SleepStage.AWAKE, hr = 92, index = 3),
             makeEpoch(SleepStage.LIGHT, index = 4)
         )
 
