@@ -228,6 +228,8 @@ fun HomeScreen(
             DreamCueConfigCard(
                 cueConfig = cueConfig,
                 connectionState = connectionState,
+                ecgConnectionState = ecgConnectionState,
+                isEcgLeadsOff = isEcgLeadsOff,
                 isTestingAudio = isTestingAudio,
                 isServiceRunning = isServiceRunning,
                 onConfigChange = { updated ->
@@ -610,6 +612,8 @@ private fun MetricItem(
 private fun DreamCueConfigCard(
     cueConfig: DreamCueConfig,
     connectionState: BleConnectionState,
+    ecgConnectionState: BleConnectionState = BleConnectionState.DISCONNECTED,
+    isEcgLeadsOff: Boolean = false,
     isTestingAudio: Boolean,
     isServiceRunning: Boolean = false,
     onConfigChange: (DreamCueConfig) -> Unit,
@@ -1029,7 +1033,7 @@ private fun DreamCueConfigCard(
             ) {
                 // Option 2: 1Hz AI Base + Opportunistic 8232 Dynamic Gain
                 val isMlSelected = cueConfig.engineMode == RemEngineMode.ML_MODEL
-                val isGainActive = isMlSelected && ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED && !isEcgLeadsOff
+                val isGainActive = isMlSelected && ecgConnectionState == BleConnectionState.CONNECTED && !isEcgLeadsOff
                 Box(
                     modifier = Modifier
                         .weight(1f)
