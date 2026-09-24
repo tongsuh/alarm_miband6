@@ -13,7 +13,8 @@ enum class PatternType(val displayName: String) {
 enum class RemEngineMode(val displayName: String, val description: String) {
     AD8232_DUAL("🫀 纯·心电双模态 (PAAWS R2 临床级)", "结合 AD8232 毫秒级心电 R-R 间期与手环三轴动量的 PAAWS R2 临床级双模态决策树模型"),
     ML_MODEL("🤖 1Hz 手环 AI (支持 8232 动态增益)", "基于 BIDSleep 临床脑电金标准训练的 1Hz 光电+体动基座，接入心电自动平滑获得毫秒级 HRV 增益"),
-    RULE_BASED("⚙️ 自适应生理规则引擎", "基于手腕动量微积分 + 心率突增比率 + 自主神经离散度的经典启发式引擎");
+    RULE_BASED("⚙️ 自适应生理规则引擎", "基于手腕动量微积分 + 心率突增比率 + 自主神经离散度的经典启发式引擎"),
+    EOG_ASSISTED_AI("👁️ EOG 辅助 AI (1Hz基座+眼动增益)", "以 1Hz 手环 AI 为基座，接入 ESP32-EOG 眼动传感器进行残差推力注入与自适应门槛下探");
 }
 
 enum class RemSensitivityLevel(
@@ -79,7 +80,12 @@ data class DreamCueConfig(
     // 5. External ECG Device (AD8232 / ESP32-C3)
     val enableAd8232Ecg: Boolean = true,
     val ad8232MacAddress: String = "",
-    val ad8232DeviceName: String = "FlashAlarm-ECG"
+    val ad8232DeviceName: String = "FlashAlarm-ECG",
+
+    // 6. External EOG Device (ESP32-EOG)
+    val enableEogDevice: Boolean = false,
+    val eogMacAddress: String = "",
+    val eogDeviceName: String = "FlashAlarm-EOG"
 ) {
     fun getActivePattern(): CustomizableVibrationPattern {
         return patterns.firstOrNull { it.id == activePatternId } ?: patterns.first()

@@ -156,6 +156,13 @@ fun SleepModeScreen(
     val isLeadsOff by ecgBleManager.isLeadsOff.collectAsState()
     val ecgLastRr by ecgBleManager.lastRrMs.collectAsState()
 
+    val eogBleManager = app.eogBleManager
+    val eogConnectionState by eogBleManager.connectionState.collectAsState()
+    val isEogContactOk by eogBleManager.isContactOk.collectAsState()
+    val isEogClipped by eogBleManager.isClipped.collectAsState()
+    val isEogSaccadeNow by eogBleManager.isSaccadeNow.collectAsState()
+    val eogBurstCount by eogBleManager.currentBurstCount.collectAsState()
+
     var currentTimeStr by remember { mutableStateOf("") }
     val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
     var isAwakeBrightness by remember { mutableStateOf(false) }
@@ -283,6 +290,7 @@ fun SleepModeScreen(
             // Real-time sensor readout chips
             val isDualActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
             val isMlActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
+            val isEogActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI
             val isEcgConnected = ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED && !isLeadsOff
             val isEcgPrimary = isDualActive &&
                     dualState == DualEngineState.ECG_PRIMARY &&
@@ -310,6 +318,7 @@ fun SleepModeScreen(
                             when {
                                 isEcgPrimary -> "$displayHr bpm 🫀"
                                 isMlEcgGainActive -> "$displayHr bpm 🫀增益"
+                                isEogActive -> "$displayHr bpm 👁️AI"
                                 isMlActive -> "$displayHr bpm ⌚基座"
                                 dualState == DualEngineState.SHADOW_PREWARMING -> "$displayHr bpm ⏳预热"
                                 dualState == DualEngineState.LATCH_BAND -> "$displayHr bpm ⌚手环"
@@ -333,6 +342,32 @@ fun SleepModeScreen(
                             fontSize = 12.sp,
                             color = GoldDream.copy(alpha = 0.85f),
                             fontFamily = FontFamily.Monospace
+                        )
+                    }
+                }
+
+                // EOG State readout Chip
+                if (isEogActive) {
+                    val isEogConnected = eogConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED
+                    val eogTagText = when {
+                        !isEogConnected -> "👁️ EOG 未连"
+                        !isEogContactOk -> "⚠️ 电极脱落"
+                        isEogClipped -> "⚠️ 伪迹饱和"
+                        isEogSaccadeNow || eogBurstCount > 0 -> "👁️ EOG 良好 (活跃)"
+                        else -> "👁️ EOG 良好 (静息)"
+                    }
+                    val eogTagColor = when {
+                        !isEogConnected -> DarkTextTertiary
+                        !isEogContactOk || isEogClipped -> Color(0xFFF59E0B)
+                        isEogSaccadeNow || eogBurstCount > 0 -> AlertPurple
+                        else -> DarkTextSecondary
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            text = eogTagText,
+                            fontSize = 14.sp,
+                            color = eogTagColor,
+                            fontWeight = if (isEogSaccadeNow || eogBurstCount > 0) FontWeight.Bold else FontWeight.Normal
                         )
                     }
                 }

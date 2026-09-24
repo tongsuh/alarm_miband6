@@ -274,6 +274,17 @@ class SleepGuardService : Service() {
                 _dualEngineState.value = null
             }
 
+            // 3.6 Connect ESP32-EOG BLE if EOG_ASSISTED_AI configured
+            val eogMac = config.eogMacAddress.ifBlank { prefs.getEogMac() }
+            val isEogMode = config.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI
+            if (isEogMode && eogMac.isNotBlank()) {
+                val isAlreadyConnected = app.eogBleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED
+                if (!isAlreadyConnected) {
+                    app.eogBleManager.setTargetDevice(eogMac)
+                    app.eogBleManager.connect(eogMac)
+                }
+            }
+
             // 4. Start Audio Analyzer if configured and permitted
             if (enableAudio) {
                 try {
@@ -382,6 +393,15 @@ class SleepGuardService : Service() {
                         val connState = app.ecgBleManager.connectionState.value
                         if (connState == com.flashalarm.miband.domain.model.BleConnectionState.DISCONNECTED) {
                             app.ecgBleManager.connect(ecgTarget)
+                        }
+                    }
+
+                    val isEogActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI
+                    val eogTarget = currentCfg.eogMacAddress.ifBlank { prefs.getEogMac() }
+                    if (isEogActive && eogTarget.isNotBlank()) {
+                        val connState = app.eogBleManager.connectionState.value
+                        if (connState == com.flashalarm.miband.domain.model.BleConnectionState.DISCONNECTED) {
+                            app.eogBleManager.connect(eogTarget)
                         }
                     }
 
@@ -503,6 +523,8 @@ class SleepGuardService : Service() {
                 val isEcgPrimary = !isEcgLatchedOff && !isShadowWarmingUp && isEcgActiveAndHealthy
 
                 val audioState = app.audioAnalyzer.state.value
+                val isEogActiveEpoch = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI
+                val eogSummary = app.eogBleManager.consumeEpochSummary()
                 val stagingResult = app.remEngine.evaluateEpoch(
                     heartRate = evaluatedHr,
                     actigraphyMagnitude = epochAvgAct,
@@ -511,7 +533,10 @@ class SleepGuardService : Service() {
                     currentTimeMs = now,
                     peakActigraphy = epochMaxAct,
                     intraEpochHrStdDev = epochHrStdDev,
-                    isEcgPrimary = isEcgPrimary
+                    isEcgPrimary = isEcgPrimary,
+                    eogBursts = if (isEogActiveEpoch) eogSummary.burstCount30s else 0,
+                    isEogContactOk = if (isEogActiveEpoch) eogSummary.isContactOk else false,
+                    isEogClipped = if (isEogActiveEpoch) eogSummary.hasClipping else false
                 )
 
                 _liveStaging.value = stagingResult
@@ -613,6 +638,15 @@ class SleepGuardService : Service() {
                         } else {
                             "📱1Hz基座"
                         }
+                    } else if (currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI) {
+                        val eogQuality = app.remEngine.eogController.signalQuality
+                        when (eogQuality) {
+                            com.flashalarm.miband.domain.algorithm.EogSignalQuality.CLEAN_BURSTING -> "👁️EOG活跃(+${"%.1f".format(app.remEngine.eogController.currentLogitBoost)})"
+                            com.flashalarm.miband.domain.algorithm.EogSignalQuality.CLEAN_RESTING -> "👁️EOG静息"
+                            com.flashalarm.miband.domain.algorithm.EogSignalQuality.NOISY_SATURATED -> "⚠️EOG伪迹"
+                            com.flashalarm.miband.domain.algorithm.EogSignalQuality.LEADS_OFF -> "⚠️EOG脱落"
+                            com.flashalarm.miband.domain.algorithm.EogSignalQuality.OFFLINE -> "👁️EOG未连"
+                        }
                     } else {
                         ""
                     }
@@ -645,6 +679,7 @@ class SleepGuardService : Service() {
             app.bleManager.setHeartRateStreamingMode(false)
             app.bleManager.disableSensorNotifications()
             app.ecgBleManager.disconnect()
+            app.eogBleManager.disconnect()
         } catch (e: Exception) {
             Log.e(TAG, "Error stopping peripherals in stopSleepGuard", e)
         }
@@ -737,6 +772,7 @@ class SleepGuardService : Service() {
             app?.bleManager?.setHeartRateStreamingMode(false)
             app?.bleManager?.disableSensorNotifications()
             app?.ecgBleManager?.disconnect()
+            app?.eogBleManager?.disconnect()
             if (wakeLock?.isHeld == true) {
                 wakeLock?.release()
             }

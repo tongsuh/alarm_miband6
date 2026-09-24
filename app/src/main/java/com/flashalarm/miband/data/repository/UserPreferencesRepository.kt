@@ -42,6 +42,9 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_ENABLE_AD8232_ECG = "pref_enable_ad8232_ecg"
         private const val KEY_AD8232_MAC = "pref_ad8232_mac"
         private const val KEY_AD8232_NAME = "pref_ad8232_name"
+        private const val KEY_ENABLE_EOG_DEVICE = "pref_enable_eog_device"
+        private const val KEY_EOG_MAC = "pref_eog_mac"
+        private const val KEY_EOG_NAME = "pref_eog_name"
     }
 
     private val _cueConfig = MutableStateFlow(loadCueConfig())
@@ -84,6 +87,9 @@ class UserPreferencesRepository(context: Context) {
             .putBoolean(KEY_ENABLE_AD8232_ECG, config.enableAd8232Ecg)
             .putString(KEY_AD8232_MAC, config.ad8232MacAddress)
             .putString(KEY_AD8232_NAME, config.ad8232DeviceName)
+            .putBoolean(KEY_ENABLE_EOG_DEVICE, config.enableEogDevice)
+            .putString(KEY_EOG_MAC, config.eogMacAddress)
+            .putString(KEY_EOG_NAME, config.eogDeviceName)
             .apply()
 
         _cueConfig.value = config
@@ -93,6 +99,12 @@ class UserPreferencesRepository(context: Context) {
     fun saveEcgMac(mac: String) {
         prefs.edit().putString(KEY_AD8232_MAC, mac).apply()
         _cueConfig.value = _cueConfig.value.copy(ad8232MacAddress = mac)
+    }
+
+    fun getEogMac(): String = prefs.getString(KEY_EOG_MAC, "") ?: ""
+    fun saveEogMac(mac: String) {
+        prefs.edit().putString(KEY_EOG_MAC, mac).apply()
+        _cueConfig.value = _cueConfig.value.copy(eogMacAddress = mac)
     }
 
     private fun loadCueConfig(): DreamCueConfig {
@@ -128,7 +140,10 @@ class UserPreferencesRepository(context: Context) {
             engineMode = engineMode,
             enableAd8232Ecg = prefs.getBoolean(KEY_ENABLE_AD8232_ECG, true),
             ad8232MacAddress = prefs.getString(KEY_AD8232_MAC, "") ?: "",
-            ad8232DeviceName = prefs.getString(KEY_AD8232_NAME, "FlashAlarm-ECG") ?: "FlashAlarm-ECG"
+            ad8232DeviceName = prefs.getString(KEY_AD8232_NAME, "FlashAlarm-ECG") ?: "FlashAlarm-ECG",
+            enableEogDevice = prefs.getBoolean(KEY_ENABLE_EOG_DEVICE, false),
+            eogMacAddress = prefs.getString(KEY_EOG_MAC, "") ?: "",
+            eogDeviceName = prefs.getString(KEY_EOG_NAME, "FlashAlarm-EOG") ?: "FlashAlarm-EOG"
         )
     }
 

@@ -47,6 +47,7 @@ class MultiModalRemEngine(
     private val remFeatureExtractor = RemFeatureExtractor()
     private val remHrvFeatureExtractor = RemHrvFeatureExtractor()
     val hrvAdaptationController = HrvAdaptationController()
+    val eogController = EogAdaptationController()
     private var sessionEpochCounter: Int = 0
 
     var isShadowPreWarming: Boolean = false
@@ -123,6 +124,7 @@ class MultiModalRemEngine(
         remFeatureExtractor.reset()
         remHrvFeatureExtractor.reset()
         hrvAdaptationController.reset()
+        eogController.reset()
         sessionEpochCounter = 0
     }
 
@@ -136,6 +138,9 @@ class MultiModalRemEngine(
      * @param peakActigraphy Peak wrist acceleration spike in current 30s epoch (g)
      * @param intraEpochHrStdDev Standard deviation of ~30 1Hz heart rate readings within current epoch
      * @param isEcgPrimary true if AD8232 is fully healthy and in ECG_PRIMARY mode
+     * @param eogBursts Accumulated eye movement bursts from ESP32-EOG during this 30s epoch
+     * @param isEogContactOk true if EOG skin contact impedance is intact
+     * @param isEogClipped true if EOG signal suffered rail-to-rail or pillow contact saturation
      */
     fun evaluateEpoch(
         heartRate: Int,
@@ -145,7 +150,10 @@ class MultiModalRemEngine(
         currentTimeMs: Long = System.currentTimeMillis(),
         peakActigraphy: Float = actigraphyMagnitude,
         intraEpochHrStdDev: Float = 0.0f,
-        isEcgPrimary: Boolean = true
+        isEcgPrimary: Boolean = true,
+        eogBursts: Int = 0,
+        isEogContactOk: Boolean = false,
+        isEogClipped: Boolean = false
     ): RemStagingResult {
         // 1. Maintain sliding windows
         if (heartRate in 36..219) {
@@ -310,6 +318,7 @@ class MultiModalRemEngine(
 
         val isDualEcgMode = cueConfig.engineMode == RemEngineMode.AD8232_DUAL
         val isMlMode = cueConfig.engineMode == RemEngineMode.ML_MODEL
+        val isEogMode = cueConfig.engineMode == RemEngineMode.EOG_ASSISTED_AI
 
         // 6.6 Push continuous metrics to PAAWS R2 True-HRV & Actigraphy Dual-Modality Extractor
         val hrvFeatures = remHrvFeatureExtractor.onEpochTick(
@@ -398,6 +407,38 @@ class MultiModalRemEngine(
                 tentativeStage = SleepStage.LIGHT
                 tentativeRemConfidence = fusedProb * 0.3f
             }
+        } else if (isEogMode && mlRemProbability != null) {
+            // Option 4: 1Hz Band AI Base + Opportunistic ESP32-EOG Residual Boosting
+            val logitBoost = eogController.updateEpoch(
+                burstCount = eogBursts,
+                isContactOk = isEogContactOk,
+                isClipped = isEogClipped,
+                wristMotionMean = actigraphyMagnitude
+            )
+
+            val pBase = mlRemProbability.toDouble().coerceIn(0.0001, 0.9999)
+            val baseLogit = kotlin.math.ln(pBase / (1.0 - pBase))
+            val fusedLogit = baseLogit + logitBoost
+            val p = 1.0 / (1.0 + kotlin.math.exp(-fusedLogit))
+            val fusedProb = p.toFloat()
+
+            // Adaptive threshold dip: drops to 0.42 when clean eye saccade bursts are active
+            val effectiveThreshold = if (eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING) {
+                kotlin.math.min(cueConfig.confidenceThreshold, 0.42f)
+            } else {
+                cueConfig.confidenceThreshold
+            }
+
+            if (fusedProb >= effectiveThreshold && atoniaScore > 0.50f) {
+                tentativeStage = SleepStage.REM
+                tentativeRemConfidence = fusedProb
+            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                tentativeStage = SleepStage.DEEP
+                tentativeRemConfidence = 0.0f
+            } else {
+                tentativeStage = SleepStage.LIGHT
+                tentativeRemConfidence = fusedProb * 0.3f
+            }
         } else if (atoniaScore > 0.70f) {
             // Option 3: Heuristic Rule Decision Path (Fallback when ML is unavailable)
             if (isAutonomicSurge) {
@@ -473,7 +514,13 @@ class MultiModalRemEngine(
             // Stage transition requested.
             // Entering REM strictly requires 3 consecutive epochs (90 seconds).
             val requiredConfirmEpochs = when {
-                tentativeStage == SleepStage.REM -> 3 // 90 seconds consecutive REM smoothing
+                tentativeStage == SleepStage.REM -> {
+                    if (isEogMode && eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING) {
+                        2 // 60 seconds fast confirmation under verified EOG eye movement bursts
+                    } else {
+                        3 // 90 seconds consecutive REM smoothing
+                    }
+                }
                 lastEstablishedStage == SleepStage.REM -> 3
                 tentativeStage == SleepStage.AWAKE -> 3
                 lastEstablishedStage == SleepStage.AWAKE -> {
@@ -520,7 +567,9 @@ class MultiModalRemEngine(
         // 8. Lucid Dream Cueing Eligibility & Cooldown
         val cooldownMs = cueConfig.cooldownMinutes * 60 * 1000L
         val isCooldownPassed = (currentTimeMs - lastCueTriggerTimeMs) >= cooldownMs
-        val meetsConfidence = remConfidence >= cueConfig.confidenceThreshold
+        val isEogBursting = isEogMode && eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING
+        val targetConfidenceThreshold = if (isEogBursting) kotlin.math.min(cueConfig.confidenceThreshold, 0.42f) else cueConfig.confidenceThreshold
+        val meetsConfidence = remConfidence >= targetConfidenceThreshold
 
         val isEligible = determinedStage == SleepStage.REM &&
                 !isVetoedByMovement &&
@@ -543,6 +592,12 @@ class MultiModalRemEngine(
                     } else {
                         "🤖 BIDSleep 16维AI模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                     }
+                } else if (isEogMode && mlRemProbability != null) {
+                    if (isEogBursting) {
+                        "👁️ EOG 眼动爆发强化命中REM期 (残差推力 +${"%.1f".format(eogController.currentLogitBoost)} | 置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(targetConfidenceThreshold * 100).toInt()}%)"
+                    } else {
+                        "🤖 1Hz AI 基座 (EOG ${eogController.signalQuality.displayName}) 命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    }
                 } else {
                     "多模态规则印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
                 }
@@ -552,7 +607,7 @@ class MultiModalRemEngine(
             elapsedMinutes < 60f -> "处于入睡前60分钟REM生理潜伏期 (已入睡 ${elapsedMinutes.toInt()}/60分钟)"
             sessionPhase == SleepSessionPhase.PROTECTION_PERIOD -> "处于前半夜深睡保护期 (剩余 $protectionRemainingMinutes 分钟)"
             !isCooldownPassed -> "处于击发冷却间隔中 (${((cooldownMs - (currentTimeMs - lastCueTriggerTimeMs)) / 60000)}分钟后解锁)"
-            !meetsConfidence -> "置信度不足 ${(remConfidence * 100).toInt()}% / ${(cueConfig.confidenceThreshold * 100).toInt()}%"
+            !meetsConfidence -> "置信度不足 ${(remConfidence * 100).toInt()}% / ${(targetConfidenceThreshold * 100).toInt()}%"
             else -> "非做梦期"
         }
 

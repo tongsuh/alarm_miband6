@@ -106,6 +106,15 @@ fun HomeScreen(
     val isEcgLeadsOff by ecgBleManager.isLeadsOff.collectAsState()
     var showEcgPairingDialog by remember { mutableStateOf(false) }
 
+    val eogBleManager = app.eogBleManager
+    val eogConnectionState by eogBleManager.connectionState.collectAsState()
+    val isEogContactOk by eogBleManager.isContactOk.collectAsState()
+    val isEogClipped by eogBleManager.isClipped.collectAsState()
+    val isEogSaccadeNow by eogBleManager.isSaccadeNow.collectAsState()
+    val eogBurstCount by eogBleManager.currentBurstCount.collectAsState()
+    val eogBatteryPct by eogBleManager.batteryPct.collectAsState()
+    var showEogPairingDialog by remember { mutableStateOf(false) }
+
     // Audio file picker launcher (copies file to app private sandbox immediately)
     val audioPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.GetContent()
@@ -222,6 +231,30 @@ fun HomeScreen(
                 )
             }
 
+            if (cueConfig.engineMode == RemEngineMode.EOG_ASSISTED_AI) {
+                Spacer(modifier = Modifier.height(14.dp))
+                EogDeviceStatusCard(
+                    connectionState = eogConnectionState,
+                    isContactOk = isEogContactOk,
+                    isClipped = isEogClipped,
+                    isSaccadeNow = isEogSaccadeNow,
+                    burstCount = eogBurstCount,
+                    batteryPct = eogBatteryPct,
+                    savedMac = cueConfig.eogMacAddress,
+                    isServiceRunning = isServiceRunning,
+                    onConnectClick = {
+                        val mac = cueConfig.eogMacAddress
+                        if (mac.isBlank()) {
+                            showEogPairingDialog = true
+                        } else {
+                            eogBleManager.connect(mac)
+                        }
+                    },
+                    onPairClick = { showEogPairingDialog = true },
+                    onDisconnectClick = { eogBleManager.disconnect() }
+                )
+            }
+
             Spacer(modifier = Modifier.height(18.dp))
 
             // 2. Lucid Dream Cueing Configuration Card (Dual Channels & Sliders)
@@ -230,6 +263,9 @@ fun HomeScreen(
                 connectionState = connectionState,
                 ecgConnectionState = ecgConnectionState,
                 isEcgLeadsOff = isEcgLeadsOff,
+                eogConnectionState = eogConnectionState,
+                isEogContactOk = isEogContactOk,
+                isEogClipped = isEogClipped,
                 isTestingAudio = isTestingAudio,
                 isServiceRunning = isServiceRunning,
                 onConfigChange = { updated ->
@@ -388,6 +424,27 @@ fun HomeScreen(
                 showEcgPairingDialog = false
             },
             onDismiss = { showEcgPairingDialog = false }
+        )
+    }
+
+    if (showEogPairingDialog) {
+        EogPairingDialog(
+            eogBleManager = eogBleManager,
+            initialMac = cueConfig.eogMacAddress,
+            onSaveAndConnect = { mac, name ->
+                val updated = cueConfig.copy(
+                    enableEogDevice = true,
+                    eogMacAddress = mac,
+                    eogDeviceName = name
+                )
+                prefs.updateCueConfig(updated)
+                prefs.saveEogMac(mac)
+                app.remEngine.updateConfig(updated)
+                eogBleManager.setTargetDevice(mac, name)
+                eogBleManager.connect(mac)
+                showEogPairingDialog = false
+            },
+            onDismiss = { showEogPairingDialog = false }
         )
     }
 
@@ -614,6 +671,9 @@ private fun DreamCueConfigCard(
     connectionState: BleConnectionState,
     ecgConnectionState: BleConnectionState = BleConnectionState.DISCONNECTED,
     isEcgLeadsOff: Boolean = false,
+    eogConnectionState: BleConnectionState = BleConnectionState.DISCONNECTED,
+    isEogContactOk: Boolean = false,
+    isEogClipped: Boolean = false,
     isTestingAudio: Boolean,
     isServiceRunning: Boolean = false,
     onConfigChange: (DreamCueConfig) -> Unit,
@@ -1107,6 +1167,79 @@ private fun DreamCueConfigCard(
                 }
             }
 
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Option 4: EOG Assisted AI (1Hz Base + Opportunistic Eye Movement Saccade Boosting)
+            val isEogSelected = cueConfig.engineMode == RemEngineMode.EOG_ASSISTED_AI
+            val isEogActiveInEngine = isEogSelected && eogConnectionState == BleConnectionState.CONNECTED && isEogContactOk
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(
+                        if (isEogSelected) AlertPurple.copy(alpha = 0.15f)
+                        else if (isServiceRunning) DarkSurface.copy(alpha = 0.5f) else DarkSurface
+                    )
+                    .border(
+                        1.dp,
+                        if (isEogSelected) (if (isEogActiveInEngine) GoldDream else AlertPurple) else DarkBorder,
+                        RoundedCornerShape(12.dp)
+                    )
+                    .clickable {
+                        if (isServiceRunning) {
+                            Toast.makeText(context, "当前正在睡眠守护中，主引擎已锁定。如需更换请先停止守护。", Toast.LENGTH_SHORT).show()
+                        } else {
+                            val updated = cueConfig.copy(
+                                engineMode = RemEngineMode.EOG_ASSISTED_AI,
+                                enableEogDevice = true
+                            )
+                            onConfigChange(updated)
+                        }
+                    }
+                    .padding(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "👁️",
+                        fontSize = 24.sp,
+                        modifier = Modifier.padding(end = 12.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "EOG 辅助 AI (1Hz基座+眼动增益)",
+                                fontSize = 13.sp,
+                                fontWeight = if (isEogSelected) FontWeight.Bold else FontWeight.SemiBold,
+                                color = if (isEogSelected) AlertPurple else if (isServiceRunning) DarkTextTertiary else DarkTextPrimary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (isEogSelected) (if (isEogActiveInEngine) GoldDream else AlertPurple) else Color(0xFF334155))
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = if (isEogActiveInEngine) "眼动在线" else "残差推力",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (isEogSelected) Color.Black else Color.White
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Text(
+                            text = "1Hz 手环 AI 基座 · 接入 ESP32-EOG 眼动爆发残差推力(+1.2~+2.2)与门槛自适应下探",
+                            fontSize = 10.sp,
+                            color = if (isEogSelected) AlertPurple.copy(alpha = 0.85f) else DarkTextTertiary
+                        )
+                    }
+                }
+            }
+
             Spacer(modifier = Modifier.height(16.dp))
 
             // --- Section 5: REM Trigger Decision Sensitivity & Threshold ---
@@ -1366,6 +1499,93 @@ private fun DreamCueConfigCard(
                         lineHeight = 14.sp
                     )
                 }
+
+                RemEngineMode.EOG_ASSISTED_AI -> {
+                    // EOG 辅助 AI 决策面板
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("EOG 辅助 AI 置信度与残差配置", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        Text(
+                            text = "${(cueConfig.confidenceThreshold * 100).toInt()}% 常规门槛 (爆发下探至42%)",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = AlertPurple
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // 3-Tier Presets for EOG Assisted Model
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        listOf(
+                            Triple(0.40f, "⚡ 敏锐探索", "爆发即促醒"),
+                            Triple(0.55f, "⚖️ 标准均衡", "推荐黄金基准"),
+                            Triple(0.70f, "🛡️ 稳健防扰", "双重强特征")
+                        ).forEach { (th, title, sub) ->
+                            val isSelected = kotlin.math.abs(cueConfig.confidenceThreshold - th) < 0.05f
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(if (isSelected) AlertPurple.copy(alpha = 0.18f) else DarkSurface)
+                                    .border(1.dp, if (isSelected) AlertPurple else DarkBorder, RoundedCornerShape(10.dp))
+                                    .clickable {
+                                        onConfigChange(cueConfig.copy(confidenceThreshold = th))
+                                    }
+                                    .padding(vertical = 8.dp, horizontal = 4.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                    Text(
+                                        text = title,
+                                        fontSize = 11.sp,
+                                        fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+                                        color = if (isSelected) AlertPurple else DarkTextPrimary
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    Text(
+                                        text = sub,
+                                        fontSize = 9.sp,
+                                        color = if (isSelected) AlertPurple else DarkTextTertiary
+                                    )
+                                    Text(
+                                        text = "基线 ${(th * 100).toInt()}%",
+                                        fontSize = 9.sp,
+                                        color = if (isSelected) GoldDream else DarkTextTertiary
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(10.dp))
+
+                    // Fine-tuning Slider
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text("微调基座 AI 概率切分线", fontSize = 11.sp, color = DarkTextSecondary)
+                        Text("%.2f".format(cueConfig.confidenceThreshold), fontSize = 11.sp, color = AlertPurple, fontWeight = FontWeight.Bold)
+                    }
+                    Slider(
+                        value = cueConfig.confidenceThreshold,
+                        onValueChange = { onConfigChange(cueConfig.copy(confidenceThreshold = (it * 100).toInt() / 100.0f)) },
+                        valueRange = 0.30f..0.85f,
+                        colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
+                    )
+                    Text(
+                        text = "💡 提示：EOG 辅助 AI 架构以 1Hz 手环 AI 为稳固基座。当检测到干净的眼球快速运动爆发（Saccade Burst）时，Logit 残差推力（+1.2 ~ +2.2）注入模型，置信门槛自适应下探至 0.42，迟滞确认从 3 个 Epoch 缩短至 2 个 Epoch（60秒）。电极脱落或翻身时瞬时归零，平滑兜底退化为手环 AI。",
+                        fontSize = 10.sp,
+                        color = DarkTextTertiary,
+                        lineHeight = 14.sp
+                    )
+                }
             }
         }
     }
@@ -1617,6 +1837,210 @@ private fun EcgDeviceStatusCard(
                     shape = RoundedCornerShape(10.dp)
                 ) {
                     Text("扫描配对", color = GoldDream, fontSize = 13.sp)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun EogDeviceStatusCard(
+    connectionState: BleConnectionState,
+    isContactOk: Boolean,
+    isClipped: Boolean,
+    isSaccadeNow: Boolean,
+    burstCount: Int,
+    batteryPct: Int,
+    savedMac: String,
+    isServiceRunning: Boolean = false,
+    onConnectClick: () -> Unit,
+    onPairClick: () -> Unit,
+    onDisconnectClick: () -> Unit
+) {
+    val context = LocalContext.current
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .border(1.dp, DarkBorder, RoundedCornerShape(20.dp)),
+        shape = RoundedCornerShape(20.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
+    ) {
+        Column(modifier = Modifier.padding(18.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        modifier = Modifier
+                            .size(10.dp)
+                            .clip(CircleShape)
+                            .background(
+                                when {
+                                    connectionState == BleConnectionState.CONNECTED && isContactOk && !isClipped -> AlertPurple
+                                    connectionState == BleConnectionState.CONNECTED && !isContactOk -> Color(0xFFF59E0B)
+                                    connectionState == BleConnectionState.CONNECTED && isClipped -> Color(0xFFEF4444)
+                                    connectionState == BleConnectionState.CONNECTING -> GoldDream
+                                    connectionState == BleConnectionState.SCANNING -> MiBandCyan
+                                    else -> Color.Gray
+                                }
+                            )
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "ESP32-EOG 眼动传感器",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = DarkTextPrimary
+                    )
+                }
+
+                Text(
+                    text = when {
+                        connectionState == BleConnectionState.CONNECTED && isContactOk && !isClipped -> {
+                            if (isSaccadeNow) "● 眼动活跃中" else "● 良好连接"
+                        }
+                        connectionState == BleConnectionState.CONNECTED && !isContactOk -> "⚠️ 电极脱落"
+                        connectionState == BleConnectionState.CONNECTED && isClipped -> "⚠️ 信号饱和"
+                        connectionState == BleConnectionState.CONNECTING -> "正在连接..."
+                        connectionState == BleConnectionState.SCANNING -> "正在扫描..."
+                        else -> "未连接"
+                    },
+                    fontSize = 12.sp,
+                    fontWeight = if (!isContactOk || isClipped) FontWeight.Bold else FontWeight.Normal,
+                    color = when {
+                        connectionState == BleConnectionState.CONNECTED && isContactOk && !isClipped -> AlertPurple
+                        connectionState == BleConnectionState.CONNECTED && (!isContactOk || isClipped) -> Color(0xFFF59E0B)
+                        connectionState == BleConnectionState.CONNECTING -> GoldDream
+                        else -> DarkTextSecondary
+                    }
+                )
+            }
+
+            if (connectionState == BleConnectionState.CONNECTED && !isContactOk) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFF59E0B).copy(alpha = 0.15f))
+                        .border(1.dp, Color(0xFFF59E0B).copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "⚠️ 眼部电极脱落！系统已瞬时将残差推力归零，平滑兜底退化为手环 1Hz AI 基座，睡眠监测不受影响，请检查电极贴片。",
+                        fontSize = 11.sp,
+                        color = Color(0xFFF59E0B),
+                        lineHeight = 15.sp
+                    )
+                }
+            } else if (connectionState == BleConnectionState.CONNECTED && isClipped) {
+                Spacer(modifier = Modifier.height(10.dp))
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(Color(0xFFEF4444).copy(alpha = 0.15f))
+                        .border(1.dp, Color(0xFFEF4444).copy(alpha = 0.4f), RoundedCornerShape(8.dp))
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "⚠️ 信号轨到轨挤压饱和（触碰枕头或电极压迫）！系统已抑制该伪迹，残差权重归零，避免误报。",
+                        fontSize = 11.sp,
+                        color = Color(0xFFEF4444),
+                        lineHeight = 15.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // Metrics readout
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                MetricItem(
+                    icon = R.drawable.ic_moon,
+                    iconTint = AlertPurple,
+                    label = "瞬时眼动频次",
+                    value = if (connectionState == BleConnectionState.CONNECTED) "$burstCount 次/秒" else "--"
+                )
+                MetricItem(
+                    icon = R.drawable.ic_stat_moon,
+                    iconTint = GoldDream,
+                    label = "设备电量",
+                    value = if (connectionState == BleConnectionState.CONNECTED) "$batteryPct%" else "--"
+                )
+                MetricItem(
+                    icon = R.drawable.ic_bluetooth,
+                    iconTint = MiBandCyan,
+                    label = "ESP32 MAC",
+                    value = if (savedMac.isNotBlank()) savedMac.takeLast(8) else "未配对"
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                if (connectionState != BleConnectionState.CONNECTED) {
+                    Button(
+                        onClick = {
+                            if (isServiceRunning) {
+                                Toast.makeText(context, "守护运行中不可连接或重配外设，请先停止睡眠守护", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onConnectClick()
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp),
+                        shape = RoundedCornerShape(10.dp),
+                        colors = ButtonDefaults.buttonColors(containerColor = AlertPurple)
+                    ) {
+                        Text(
+                            text = if (savedMac.isNotBlank()) "连接眼动外设" else "配对 EOG",
+                            color = Color.White,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = {
+                            if (isServiceRunning) {
+                                Toast.makeText(context, "守护运行中不可断开眼动外设，请先停止睡眠守护", Toast.LENGTH_SHORT).show()
+                            } else {
+                                onDisconnectClick()
+                            }
+                        },
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(42.dp),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text("断开眼动", color = DarkTextSecondary, fontSize = 13.sp)
+                    }
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        if (isServiceRunning) {
+                            Toast.makeText(context, "守护运行中不可重新配对外设，请先停止睡眠守护", Toast.LENGTH_SHORT).show()
+                        } else {
+                            onPairClick()
+                        }
+                    },
+                    modifier = Modifier
+                        .weight(1f)
+                        .height(42.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("扫描配对", color = AlertPurple, fontSize = 13.sp)
                 }
             }
         }
