@@ -50,6 +50,7 @@ import com.flashalarm.miband.domain.model.DualEngineState
 import com.flashalarm.miband.domain.model.SleepSessionPhase
 import com.flashalarm.miband.service.SleepGuardService
 import com.flashalarm.miband.ui.components.SlideToStopSlider
+import com.flashalarm.miband.ui.theme.AlertPurple
 import com.flashalarm.miband.ui.theme.DarkBorder
 import com.flashalarm.miband.ui.theme.DarkSurfaceElevated
 import com.flashalarm.miband.ui.theme.DarkTextPrimary
