@@ -263,14 +263,15 @@ class MultiModalRemEngine(
         val elapsedMinutes = if (isSleepOnsetDetected) elapsedSinceOnsetMs / 60000f else 0f
         val ultradianPrior = if (isSleepOnsetDetected) calculateUltradianRemPrior(elapsedMinutes) else 0.05f
 
-        // 6.5 Push continuous metrics to ML Feature Extractor (maintains 21-epoch 5-min delay buffer)
+        // 6.5 Push continuous metrics to ML Feature Extractor (maintains 17-epoch 3-min delay buffer)
         sessionEpochCounter++
         val mlFeatures = remFeatureExtractor.pushEpoch(
             epochIndex = sessionEpochCounter,
             meanHr = if (heartRate in 36..219) heartRate.toFloat() else deepSleepBaselineHr,
             stdHr = intraEpochHrStdDev,
             meanMotion = actigraphyMagnitude,
-            peakMotion = peakActigraphy
+            peakMotion = peakActigraphy,
+            timeSinceOnsetMin = if (isSleepOnsetDetected) elapsedMinutes.toDouble() else (sessionEpochCounter * 0.5)
         )
         val mlRemProbability: Float? = if (mlFeatures != null) {
             try {
@@ -328,7 +329,7 @@ class MultiModalRemEngine(
                 tentativeRemConfidence = prob * 0.3f
             }
         } else if ((isMlMode || isDualEcgMode) && mlRemProbability != null) {
-            // Option 2: AI Machine Learning Decision Path (Mi Band 21-dim tree model)
+            // Option 2: AI Machine Learning Decision Path (Mi Band 16-dim BIDSleep tree model)
             // Primary path for ML_MODEL mode, and Hot-Standby Failover for AD8232_DUAL mode!
             if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.60f) {
                 tentativeStage = SleepStage.REM
@@ -375,8 +376,30 @@ class MultiModalRemEngine(
             tentativeRemConfidence = 0.05f
         }
 
-        // Temporal Hysteresis Filter:
-        // Eliminates 1-minute isolated chattering between stages (e.g. 1m AWAKE next to 1m REM)
+        // 7.1 AASM Physiological State Machine Circuit Breakers (Clinical Ground Truth Guardrails)
+        if (tentativeStage == SleepStage.REM) {
+            // Circuit Breaker 1: Muscle Atonia Veto (One-Vote Veto)
+            // REM sleep physiologically mandates postural muscle tone abolition.
+            if (atoniaScore < 0.60f || isMicroMovement || isSubstantialMovement) {
+                tentativeStage = if (isSubstantialMovement) SleepStage.AWAKE else SleepStage.LIGHT
+                tentativeRemConfidence = 0.0f
+            }
+            // Circuit Breaker 2: Sleep Onset 60-Minute Latency Gate
+            // Physiological REM latency is >=60-90 min; REM occurring before 60m is physiologically anomalous.
+            else if (!isSleepOnsetDetected || elapsedMinutes < 60.0f) {
+                tentativeStage = SleepStage.LIGHT
+                tentativeRemConfidence = 0.10f
+            }
+            // Circuit Breaker 3: Deep Sleep Direct Jump Taboo (N3 -> REM forbidden)
+            // AASM sleep architecture strictly requires cycling through N2 (Light) before entering REM.
+            else if (lastEstablishedStage == SleepStage.DEEP) {
+                tentativeStage = SleepStage.LIGHT
+                tentativeRemConfidence = 0.15f
+            }
+        }
+
+        // Temporal Hysteresis Filter (AASM Circuit Breaker 4: 90-Second Consecutive Smoothing):
+        // Eliminates transient artifacts; REM strictly requires 3 consecutive epochs (90s continuous confirmation)
         val determinedStage: SleepStage
         if (isSustainedAwake) {
             // Confirmed sustained waking movement across epochs
@@ -390,15 +413,9 @@ class MultiModalRemEngine(
             determinedStage = lastEstablishedStage
         } else {
             // Stage transition requested.
+            // Entering REM strictly requires 3 consecutive epochs (90 seconds).
             val requiredConfirmEpochs = when {
-                tentativeStage == SleepStage.REM -> {
-                    when {
-                        cueConfig.confidenceThreshold <= 0.45f -> 3
-                        tentativeRemConfidence >= 0.80f -> 3
-                        cueConfig.confidenceThreshold >= 0.65f -> 4
-                        else -> 4
-                    }
-                }
+                tentativeStage == SleepStage.REM -> 3 // 90 seconds consecutive REM smoothing
                 lastEstablishedStage == SleepStage.REM -> 3
                 tentativeStage == SleepStage.AWAKE -> 3
                 lastEstablishedStage == SleepStage.AWAKE -> {
@@ -450,6 +467,7 @@ class MultiModalRemEngine(
         val isEligible = determinedStage == SleepStage.REM &&
                 !isVetoedByMovement &&
                 isWithinTimingWindow &&
+                (isSleepOnsetDetected && elapsedMinutes >= 60.0f) &&
                 meetsConfidence
 
         val shouldTrigger = isEligible && isCooldownPassed
@@ -459,15 +477,16 @@ class MultiModalRemEngine(
                 if (isPaawsActive) {
                     "PAAWS R2 真心电双模态命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else if (isDualEcgMode && mlRemProbability != null) {
-                    "手环AI决策树(双模态热备接管)命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    "手环16维AI模型(双模态热备接管)命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else if (isMlMode && mlRemProbability != null) {
-                    "AI决策树模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    "BIDSleep 16维AI模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else {
                     "多模态规则印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
                 }
             }
             isVetoedByMovement -> "手腕体动一票否决"
             !isSleepOnsetDetected -> "正在监测入睡状态 (静息沉淀 ${sustainedStillnessEpochs}/16)"
+            elapsedMinutes < 60f -> "处于入睡前60分钟REM生理潜伏期 (已入睡 ${elapsedMinutes.toInt()}/60分钟)"
             sessionPhase == SleepSessionPhase.PROTECTION_PERIOD -> "处于前半夜深睡保护期 (剩余 $protectionRemainingMinutes 分钟)"
             !isCooldownPassed -> "处于击发冷却间隔中 (${((cooldownMs - (currentTimeMs - lastCueTriggerTimeMs)) / 60000)}分钟后解锁)"
             !meetsConfidence -> "置信度不足 ${(remConfidence * 100).toInt()}% / ${(cueConfig.confidenceThreshold * 100).toInt()}%"
