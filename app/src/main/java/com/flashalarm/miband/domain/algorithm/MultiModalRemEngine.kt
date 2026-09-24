@@ -46,6 +46,7 @@ class MultiModalRemEngine(
     // ML Classifier Support
     private val remFeatureExtractor = RemFeatureExtractor()
     private val remHrvFeatureExtractor = RemHrvFeatureExtractor()
+    val hrvAdaptationController = HrvAdaptationController()
     private var sessionEpochCounter: Int = 0
 
     var isShadowPreWarming: Boolean = false
@@ -63,8 +64,15 @@ class MultiModalRemEngine(
         this.cueConfig = config
     }
 
-    fun pushRrInterval(rrMs: Double, timestampMs: Long = System.currentTimeMillis()) {
-        remHrvFeatureExtractor.pushRrInterval(rrMs, timestampMs)
+    fun pushRrInterval(
+        rrMs: Double,
+        isHardwareLeadsOff: Boolean = false,
+        timestampMs: Long = System.currentTimeMillis()
+    ) {
+        val accepted = hrvAdaptationController.onRawRrIntervalReceived(rrMs, isHardwareLeadsOff, timestampMs)
+        if (accepted) {
+            remHrvFeatureExtractor.pushRrInterval(rrMs, timestampMs)
+        }
     }
 
     fun pushActigraphy(actG: Double, timestampMs: Long = System.currentTimeMillis()) {
@@ -74,6 +82,23 @@ class MultiModalRemEngine(
     fun onLeadsOff(isConfirmed: Boolean = false) {
         remHrvFeatureExtractor.onLeadsOff(isConfirmed = isConfirmed)
     }
+
+    fun onBleConnected() {
+        hrvAdaptationController.onBleConnected()
+    }
+
+    fun onBleDisconnected() {
+        hrvAdaptationController.onBleDisconnected()
+        remHrvFeatureExtractor.onLeadsOff(isConfirmed = true)
+    }
+
+    fun onWatchdogTick(nowMs: Long = System.currentTimeMillis()) {
+        hrvAdaptationController.onWatchdogTick(nowMs)
+    }
+
+    fun getHrvGainWeight(): Float = hrvAdaptationController.currentWeight
+
+    fun getHrvAdaptationState(): HrvAdaptationController.State = hrvAdaptationController.currentState
 
     fun startSession(startTimeMs: Long = System.currentTimeMillis()) {
         sessionStartTimeMs = startTimeMs
@@ -97,6 +122,7 @@ class MultiModalRemEngine(
         pendingStageCount = 0
         remFeatureExtractor.reset()
         remHrvFeatureExtractor.reset()
+        hrvAdaptationController.reset()
         sessionEpochCounter = 0
     }
 
@@ -143,22 +169,23 @@ class MultiModalRemEngine(
             if (recentAudioIrregularities.size > 30) recentAudioIrregularities.removeFirst()
         }
 
-        // 2. Wrist Actigraphy: Muscle Atonia & Awakening Detection
+        // 2. Wrist Actigraphy: Relaxed Two-Tier Muscle Atonia & Awakening State Machine
         val avgMovement = if (recentActigraphy.isNotEmpty()) recentActigraphy.average().toFloat() else actigraphyMagnitude
-        // Atonia score: 1.0 when completely motionless (<0.015g), drops toward 0 when moving
-        val atoniaScore = (1.0f - (avgMovement / 0.08f)).coerceIn(0.0f, 1.0f)
+        // Atonia score: relaxed scale (0.10g divisor), 1.0 when completely motionless, smoothly drops during movement
+        val atoniaScore = (1.0f - (avgMovement / 0.10f)).coerceIn(0.0f, 1.0f)
 
-        // Movement Classification (AASM-aligned):
-        // A. Micro-movements: brief 3-15s isolated twitches or single rollovers
-        val isMicroMovement = peakActigraphy > 0.16f || actigraphyMagnitude > 0.045f
+        // Tier 1: Phasic twitches (0.15g ~ 0.45g peak, but epoch mean actigraphyMagnitude < 0.075g)
+        // Natural physiological twitches in vivid dreams - preserved, does NOT veto REM stage!
+        val isPhasicTwitch = (peakActigraphy in 0.15f..0.45f) && actigraphyMagnitude < 0.075f
 
-        // B. Substantial movements: continuous physical activity sustained across the 30s epoch
-        val isSubstantialMovement = actigraphyMagnitude >= 0.12f || (peakActigraphy >= 0.32f && actigraphyMagnitude >= 0.06f)
+        // Tier 2: Gross movements & substantial rolling activity
+        val isGrossMovement = actigraphyMagnitude >= 0.10f || (peakActigraphy >= 0.45f && actigraphyMagnitude >= 0.06f)
+        val isSubstantialMovement = actigraphyMagnitude >= 0.12f || (peakActigraphy >= 0.35f && actigraphyMagnitude >= 0.06f)
 
-        if (isSubstantialMovement) {
+        if (isSubstantialMovement || isGrossMovement) {
             consecutiveSubstantialMovingEpochs++
             consecutiveMovingEpochs++
-        } else if (isMicroMovement) {
+        } else if (isPhasicTwitch || peakActigraphy > 0.16f) {
             consecutiveMovingEpochs++
             consecutiveSubstantialMovingEpochs = (consecutiveSubstantialMovingEpochs - 1).coerceAtLeast(0)
         } else {
@@ -167,21 +194,20 @@ class MultiModalRemEngine(
         }
 
         // C. Vigorous waking movement (e.g. sitting up, getting out of bed):
-        // High sustained epoch acceleration (>=0.28g) accompanied by wake-level heart rate (>=76 bpm or >=22% surge over deep baseline), or intense gross movement (>=0.42g)
         val hasWakeHrElevation = heartRate >= 76 || (deepSleepBaselineHr > 0 && (heartRate - deepSleepBaselineHr) / deepSleepBaselineHr >= 0.22f)
         val isVigorousWakeMovement = (actigraphyMagnitude >= 0.28f && hasWakeHrElevation) || actigraphyMagnitude >= 0.42f
 
         // D. Sustained macroscopic movement across epochs:
-        // Under AASM guidelines, an isolated rollover or postural shift (<15s) in sleep is a movement micro-arousal, NOT Stage Wake.
-        // True awakening requires sustained physical movement across >= 4 epochs (2 minutes), or vigorous waking movement across >= 2 epochs, or high multi-minute average with wake HR:
         val isSustainedAwake = (consecutiveSubstantialMovingEpochs >= 4) ||
                 (consecutiveMovingEpochs >= 2 && isVigorousWakeMovement) ||
                 (avgMovement > 0.20f && hasWakeHrElevation) ||
                 (avgMovement > 0.26f)
 
         // Per user requirement:
-        // Micro-movements / normal isolated rollovers DO NOT veto dream cue vibrations! Only sustained awakening vetoes vibration.
-        val isVetoedByMovement = isSustainedAwake
+        // Isolated dream twitches do not veto dream cue eligibility;
+        // only sustained awakening or a sudden high-intensity movement spike (>0.40g) pauses cue dispatch for this epoch.
+        val isTransientSpikeActive = peakActigraphy > 0.40f || isSubstantialMovement
+        val isVetoedByMovement = isSustainedAwake || isTransientSpikeActive
 
         // 3. Autonomic PPG Heart Rate & Dispersion
         val shortTermMeanHr = if (shortTermHeartRates.isNotEmpty()) shortTermHeartRates.average().toFloat() else heartRate.toFloat()
@@ -301,8 +327,7 @@ class MultiModalRemEngine(
         } else null
 
         // 7. Staging Decision & 3-Epoch Temporal Hysteresis Filter
-        // Option 1: PAAWS R2 True-HRV model is active in dual mode when ECG is primary and not shadow pre-warming
-        val isPaawsActive = isDualEcgMode && hrvRemProbability != null && !isShadowPreWarming && isEcgPrimary
+        val wHrv = hrvAdaptationController.onEpochBoundary()
 
         // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
         val isAutonomicSurge = (hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
@@ -315,31 +340,63 @@ class MultiModalRemEngine(
         if (isSustainedAwake) {
             tentativeStage = SleepStage.AWAKE
             tentativeRemConfidence = 0.0f
-        } else if (isPaawsActive) {
-            // Option 1: PAAWS R2 True-HRV + Actigraphy Dual-Modality Decision Path (141 subjects ground truth)
-            val prob = hrvRemProbability!!
-            if (prob >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
-                tentativeStage = SleepStage.REM
-                tentativeRemConfidence = prob
-            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
-                tentativeStage = SleepStage.DEEP
-                tentativeRemConfidence = 0.0f
+        } else if (isDualEcgMode) {
+            // Option 1: PAAWS R2 Pure AD8232 True-HRV Dual Modality (Clinical Grade) - KEPT INTACT
+            val isPaawsActive = hrvRemProbability != null && !isShadowPreWarming && isEcgPrimary
+            if (isPaawsActive) {
+                val prob = hrvRemProbability!!
+                if (prob >= cueConfig.confidenceThreshold && atoniaScore > 0.45f) {
+                    tentativeStage = SleepStage.REM
+                    tentativeRemConfidence = prob
+                } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                    tentativeStage = SleepStage.DEEP
+                    tentativeRemConfidence = 0.0f
+                } else {
+                    tentativeStage = SleepStage.LIGHT
+                    tentativeRemConfidence = prob * 0.3f
+                }
+            } else if (mlRemProbability != null) {
+                // Hot-Standby Failover for AD8232_DUAL mode
+                if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
+                    tentativeStage = SleepStage.REM
+                    tentativeRemConfidence = mlRemProbability
+                } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                    tentativeStage = SleepStage.DEEP
+                    tentativeRemConfidence = 0.0f
+                } else {
+                    tentativeStage = SleepStage.LIGHT
+                    tentativeRemConfidence = mlRemProbability * 0.3f
+                }
             } else {
                 tentativeStage = SleepStage.LIGHT
-                tentativeRemConfidence = prob * 0.3f
+                tentativeRemConfidence = 0.10f
             }
-        } else if ((isMlMode || isDualEcgMode) && mlRemProbability != null) {
-            // Option 2: AI Machine Learning Decision Path (Mi Band 16-dim BIDSleep tree model)
-            // Primary path for ML_MODEL mode, and Hot-Standby Failover for AD8232_DUAL mode!
-            if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.60f) {
+        } else if (isMlMode && mlRemProbability != null) {
+            // Option 2: 1Hz Band AI Base + Opportunistic 8232 True-HRV Dynamic Residual Gain
+            // Mathematically identical to 1Hz pure model when wHrv == 0.0f
+            val pBase = mlRemProbability.toDouble().coerceIn(0.0001, 0.9999)
+            val baseLogit = kotlin.math.ln(pBase / (1.0 - pBase))
+
+            val fusedProb: Float = if (hrvRemProbability != null && wHrv > 0.0f) {
+                val pHrv = hrvRemProbability.toDouble().coerceIn(0.0001, 0.9999)
+                val hrvLogit = kotlin.math.ln(pHrv / (1.0 - pHrv))
+                val deltaLogit = hrvLogit - baseLogit
+                val fusedLogit = baseLogit + (wHrv * deltaLogit)
+                val p = 1.0 / (1.0 + kotlin.math.exp(-fusedLogit))
+                p.toFloat()
+            } else {
+                mlRemProbability
+            }
+
+            if (fusedProb >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
                 tentativeStage = SleepStage.REM
-                tentativeRemConfidence = mlRemProbability
+                tentativeRemConfidence = fusedProb
             } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
                 tentativeStage = SleepStage.DEEP
                 tentativeRemConfidence = 0.0f
             } else {
                 tentativeStage = SleepStage.LIGHT
-                tentativeRemConfidence = mlRemProbability * 0.3f
+                tentativeRemConfidence = fusedProb * 0.3f
             }
         } else if (atoniaScore > 0.70f) {
             // Option 3: Heuristic Rule Decision Path (Fallback when ML is unavailable)
@@ -378,9 +435,10 @@ class MultiModalRemEngine(
 
         // 7.1 AASM Physiological State Machine Circuit Breakers (Clinical Ground Truth Guardrails)
         if (tentativeStage == SleepStage.REM) {
-            // Circuit Breaker 1: Muscle Atonia Veto (One-Vote Veto)
-            // REM sleep physiologically mandates postural muscle tone abolition.
-            if (atoniaScore < 0.60f || isMicroMovement || isSubstantialMovement) {
+            // Circuit Breaker 1: Postural Muscle Atonia vs Phasic Twitches
+            // Relaxed Two-Tier State Machine: Only gross movement or prolonged muscle activity forces stage out of REM.
+            // Phasic Twitches (isolated muscle twitches in vivid dreams) are preserved!
+            if (isGrossMovement || atoniaScore < 0.45f) {
                 tentativeStage = if (isSubstantialMovement) SleepStage.AWAKE else SleepStage.LIGHT
                 tentativeRemConfidence = 0.0f
             }
@@ -472,19 +530,24 @@ class MultiModalRemEngine(
 
         val shouldTrigger = isEligible && isCooldownPassed
 
+        val isPaawsActive = isDualEcgMode && hrvRemProbability != null && !isShadowPreWarming && isEcgPrimary
         val triggerReason = when {
             shouldTrigger -> {
                 if (isPaawsActive) {
-                    "PAAWS R2 真心电双模态命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    "🫀 PAAWS R2 纯心电双模态命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else if (isDualEcgMode && mlRemProbability != null) {
-                    "手环16维AI模型(双模态热备接管)命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    "手环16维AI模型(纯心电双模热备接管)命中做梦期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                 } else if (isMlMode && mlRemProbability != null) {
-                    "BIDSleep 16维AI模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    if (wHrv > 0.0f) {
+                        "🫀 1Hz AI 基座 + True-HRV 动态增益命中REM期 (增益权重 ${(wHrv * 100).toInt()}% | 置信度 ${(remConfidence * 100).toInt()}%)"
+                    } else {
+                        "🤖 BIDSleep 16维AI模型印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
+                    }
                 } else {
                     "多模态规则印证命中REM期 (置信度 ${(remConfidence * 100).toInt()}% | 周期先验 ${(ultradianPrior * 100).toInt()}%)"
                 }
             }
-            isVetoedByMovement -> "手腕体动一票否决"
+            isVetoedByMovement -> "手腕体动避让保护"
             !isSleepOnsetDetected -> "正在监测入睡状态 (静息沉淀 ${sustainedStillnessEpochs}/16)"
             elapsedMinutes < 60f -> "处于入睡前60分钟REM生理潜伏期 (已入睡 ${elapsedMinutes.toInt()}/60分钟)"
             sessionPhase == SleepSessionPhase.PROTECTION_PERIOD -> "处于前半夜深睡保护期 (剩余 $protectionRemainingMinutes 分钟)"

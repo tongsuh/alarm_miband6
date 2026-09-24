@@ -11,8 +11,8 @@ enum class PatternType(val displayName: String) {
 }
 
 enum class RemEngineMode(val displayName: String, val description: String) {
-    AD8232_DUAL("🫀 真·心电双模态 (ESP32+手环)", "结合 AD8232 毫秒级心电 R-R 间期与手环三轴动量的 PAAWS R2 临床级双模态决策树模型"),
-    ML_MODEL("🤖 AI 机器学习模型 (PhysioNet)", "基于 Apple Watch + 临床脑电金标准训练的轻量决策树模型，具备 5 分钟延时确认"),
+    AD8232_DUAL("🫀 纯·心电双模态 (PAAWS R2 临床级)", "结合 AD8232 毫秒级心电 R-R 间期与手环三轴动量的 PAAWS R2 临床级双模态决策树模型"),
+    ML_MODEL("🤖 1Hz 手环 AI (支持 8232 动态增益)", "基于 BIDSleep 临床脑电金标准训练的 1Hz 光电+体动基座，接入心电自动平滑获得毫秒级 HRV 增益"),
     RULE_BASED("⚙️ 自适应生理规则引擎", "基于手腕动量微积分 + 心率突增比率 + 自主神经离散度的经典启发式引擎");
 }
 

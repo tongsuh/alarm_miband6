@@ -282,11 +282,13 @@ fun SleepModeScreen(
 
             // Real-time sensor readout chips
             val isDualActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+            val isMlActive = cueConfig.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
+            val isEcgConnected = ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED && !isLeadsOff
             val isEcgPrimary = isDualActive &&
                     dualState == DualEngineState.ECG_PRIMARY &&
-                    ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED &&
-                    !isLeadsOff &&
+                    isEcgConnected &&
                     ecgHr > 0
+            val isMlEcgGainActive = isMlActive && isEcgConnected && ecgLastRr > 0.0
 
             val displayHr = if (isEcgPrimary) ecgHr else metrics.heartRateBpm
 
@@ -307,6 +309,8 @@ fun SleepModeScreen(
                         text = if (displayHr > 0) {
                             when {
                                 isEcgPrimary -> "$displayHr bpm 🫀"
+                                isMlEcgGainActive -> "$displayHr bpm 🫀增益"
+                                isMlActive -> "$displayHr bpm ⌚基座"
                                 dualState == DualEngineState.SHADOW_PREWARMING -> "$displayHr bpm ⏳预热"
                                 dualState == DualEngineState.LATCH_BAND -> "$displayHr bpm ⌚手环"
                                 else -> "$displayHr bpm"
@@ -322,7 +326,7 @@ fun SleepModeScreen(
                 }
 
                 // If ECG R-R is valid, display live R-R ms
-                if (isEcgPrimary && ecgLastRr > 0.0) {
+                if ((isEcgPrimary || isMlEcgGainActive) && ecgLastRr > 0.0) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(
                             text = "逐搏 %.0fms".format(ecgLastRr),

@@ -240,23 +240,31 @@ class SleepGuardService : Service() {
                 }
             }
 
-            // 3.5 Connect AD8232 / ESP32-C3 BLE if Dual-Modality configured
+            // 3.5 Connect AD8232 / ESP32-C3 BLE if Dual-Modality or 1Hz+HRV configured
             val ecgMac = prefs.getEcgMac()
             val isDualMode = config.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+            val isMlMode = config.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
             isEcgLatchedOff = false
             isShadowWarmingUp = false
             leadsOffStartTimeMs = 0L
-            if (isDualMode && ecgMac.isNotBlank()) {
+            if ((isDualMode || isMlMode) && ecgMac.isNotBlank()) {
                 val isAlreadyConnected = app.ecgBleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED
                 val isLeadsOff = app.ecgBleManager.isLeadsOff.value
-                if (isAlreadyConnected && !isLeadsOff) {
-                    isShadowWarmingUp = false
-                    app.remEngine.setShadowPreWarming(false)
-                    _dualEngineState.value = DualEngineState.ECG_PRIMARY
+                if (isDualMode) {
+                    if (isAlreadyConnected && !isLeadsOff) {
+                        isShadowWarmingUp = false
+                        app.remEngine.setShadowPreWarming(false)
+                        _dualEngineState.value = DualEngineState.ECG_PRIMARY
+                    } else {
+                        isShadowWarmingUp = true
+                        app.remEngine.setShadowPreWarming(true)
+                        _dualEngineState.value = DualEngineState.SHADOW_PREWARMING
+                    }
                 } else {
-                    isShadowWarmingUp = true
-                    app.remEngine.setShadowPreWarming(true)
-                    _dualEngineState.value = DualEngineState.SHADOW_PREWARMING
+                    _dualEngineState.value = null
+                    if (isAlreadyConnected && !isLeadsOff) {
+                        app.remEngine.onBleConnected()
+                    }
                 }
                 if (!isAlreadyConnected) {
                     app.ecgBleManager.setTargetDevice(ecgMac)
@@ -296,8 +304,9 @@ class SleepGuardService : Service() {
             }
             launch {
                 app.ecgBleManager.rrIntervalFlow.collect { rrMs ->
+                    val leadsOff = app.ecgBleManager.isLeadsOff.value
                     if (!isEcgLatchedOff) {
-                        app.remEngine.pushRrInterval(rrMs)
+                        app.remEngine.pushRrInterval(rrMs, isHardwareLeadsOff = leadsOff)
                     }
                 }
             }
@@ -333,6 +342,11 @@ class SleepGuardService : Service() {
                 app.ecgBleManager.connectionState.collect { connState ->
                     val currentCfg = app.userPreferencesRepository.cueConfig.value
                     val dualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+                    if (connState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
+                        app.remEngine.onBleConnected()
+                    } else if (connState == com.flashalarm.miband.domain.model.BleConnectionState.DISCONNECTED) {
+                        app.remEngine.onBleDisconnected()
+                    }
                     if (dualActive && !isEcgLatchedOff) {
                         if (connState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
                             val isLeadsOff = app.ecgBleManager.isLeadsOff.value
@@ -356,9 +370,20 @@ class SleepGuardService : Service() {
             // Periodic 1s watchdog for debounced leads-off & state machine transitions
             launch {
                 while (isActive) {
+                    val now = System.currentTimeMillis()
+                    app.remEngine.onWatchdogTick(now)
+
                     val currentCfg = app.userPreferencesRepository.cueConfig.value
                     val dualActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.AD8232_DUAL
+                    val mlActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
                     val ecgTarget = currentCfg.ad8232MacAddress.ifBlank { ecgMac }
+
+                    if (mlActive && ecgTarget.isNotBlank()) {
+                        val connState = app.ecgBleManager.connectionState.value
+                        if (connState == com.flashalarm.miband.domain.model.BleConnectionState.DISCONNECTED) {
+                            app.ecgBleManager.connect(ecgTarget)
+                        }
+                    }
 
                     if (dualActive && ecgTarget.isNotBlank()) {
                         if (isEcgLatchedOff) {
@@ -571,11 +596,25 @@ class SleepGuardService : Service() {
 
                     updateNotification("✨ 黄金触梦已激发 ($methodDescription | 置信度 ${(stagingResult.confidence * 100).toInt()}%)")
                 } else {
-                    val stateTag = when (dualState) {
-                        DualEngineState.ECG_PRIMARY -> "🫀心电双模"
-                        DualEngineState.SHADOW_PREWARMING -> "⏳心电预热(${app.remEngine.getHrvBufferSize()}/21)"
-                        DualEngineState.LATCH_BAND -> "🔒手环锁存"
-                        null -> ""
+                    val stateTag = if (isDualActive) {
+                        when (dualState) {
+                            DualEngineState.ECG_PRIMARY -> "🫀心电双模"
+                            DualEngineState.SHADOW_PREWARMING -> "⏳心电预热(${app.remEngine.getHrvBufferSize()}/21)"
+                            DualEngineState.LATCH_BAND -> "🔒手环锁存"
+                            null -> ""
+                        }
+                    } else if (currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL) {
+                        val w = app.remEngine.getHrvGainWeight()
+                        val hrvState = app.remEngine.getHrvAdaptationState()
+                        if (w > 0.0f) {
+                            "🫀1Hz+HRV增益(${(w * 100).toInt()}%)"
+                        } else if (hrvState == com.flashalarm.miband.domain.algorithm.HrvAdaptationController.State.CONTACT_DEBOUNCING) {
+                            "⏳HRV校准中"
+                        } else {
+                            "📱1Hz基座"
+                        }
+                    } else {
+                        ""
                     }
                     val phaseDesc = when (stagingResult.sessionPhase) {
                         SleepSessionPhase.DETECTING_ONSET -> "监测入睡中"

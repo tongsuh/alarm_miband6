@@ -200,7 +200,7 @@ fun HomeScreen(
                 onDisconnectClick = { bleManager.disconnect() }
             )
 
-            if (cueConfig.engineMode == RemEngineMode.AD8232_DUAL) {
+            if (cueConfig.engineMode == RemEngineMode.AD8232_DUAL || cueConfig.engineMode == RemEngineMode.ML_MODEL) {
                 Spacer(modifier = Modifier.height(14.dp))
                 EcgDeviceStatusCard(
                     connectionState = ecgConnectionState,
@@ -991,7 +991,7 @@ private fun DreamCueConfigCard(
                     Column(modifier = Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "AD8232 真心电双模态",
+                                text = "AD8232 纯心电双模态 (临床级)",
                                 fontSize = 13.sp,
                                 fontWeight = if (isDualSelected) FontWeight.Bold else FontWeight.SemiBold,
                                 color = if (isDualSelected) GoldDream else if (isServiceRunning) DarkTextTertiary else DarkTextPrimary
@@ -1027,8 +1027,9 @@ private fun DreamCueConfigCard(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                // Option 2: ML Model (PhysioNet)
+                // Option 2: 1Hz AI Base + Opportunistic 8232 Dynamic Gain
                 val isMlSelected = cueConfig.engineMode == RemEngineMode.ML_MODEL
+                val isGainActive = isMlSelected && ecgConnectionState == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED && !isEcgLeadsOff
                 Box(
                     modifier = Modifier
                         .weight(1f)
@@ -1037,7 +1038,7 @@ private fun DreamCueConfigCard(
                             if (isMlSelected) MiBandCyan.copy(alpha = 0.15f)
                             else if (isServiceRunning) DarkSurface.copy(alpha = 0.5f) else DarkSurface
                         )
-                        .border(1.dp, if (isMlSelected) MiBandCyan else DarkBorder, RoundedCornerShape(10.dp))
+                        .border(1.dp, if (isMlSelected) (if (isGainActive) GoldDream else MiBandCyan) else DarkBorder, RoundedCornerShape(10.dp))
                         .clickable {
                             if (isServiceRunning) {
                                 Toast.makeText(context, "当前正在睡眠守护中，主引擎已锁定。如需更换请先停止守护。", Toast.LENGTH_SHORT).show()
@@ -1050,16 +1051,16 @@ private fun DreamCueConfigCard(
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text(
-                            text = "🤖 手环 AI 决策树",
+                            text = "🤖 1Hz AI (支持8232增益)",
                             fontSize = 12.sp,
                             fontWeight = if (isMlSelected) FontWeight.Bold else FontWeight.Normal,
                             color = if (isMlSelected) MiBandCyan else if (isServiceRunning) DarkTextTertiary else DarkTextPrimary
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
-                            text = "1Hz 光电 + 5分延时",
+                            text = if (isGainActive) "🫀 HRV 动态增益中" else "1Hz 光电基座+动态增益",
                             fontSize = 10.sp,
-                            color = if (isMlSelected) MiBandCyan.copy(alpha = 0.8f) else DarkTextTertiary
+                            color = if (isMlSelected) (if (isGainActive) GoldDream else MiBandCyan.copy(alpha = 0.8f)) else DarkTextTertiary
                         )
                     }
                 }
@@ -1267,7 +1268,7 @@ private fun DreamCueConfigCard(
                         colors = SliderDefaults.colors(thumbColor = MiBandCyan, activeTrackColor = MiBandCyan)
                     )
                     Text(
-                        text = "💡 提示：手环 AI 模型基于临床脑电金标准数据集训练，该滑块微调 1Hz 光电与体动的后验概率切分线。门槛越低捕梦越敏锐，门槛越高防扰越稳健。",
+                        text = "💡 提示：手环 AI 模型基于临床脑电金标准训练，以 1Hz 光电与体动为刚性基座。若连接 AD8232 心电，系统将自适应注入毫秒级 HRV 残差增益（+3%~5%）。门槛越低捕梦越敏锐，门槛越高防扰越稳健。",
                         fontSize = 10.sp,
                         color = DarkTextTertiary,
                         lineHeight = 14.sp
