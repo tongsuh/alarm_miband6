@@ -32,6 +32,7 @@ class EogAdaptationController {
         private const val TAG = "EogAdaptation"
         const val WRIST_MOTION_SUPPRESSION_THRESHOLD_G = 0.09f
         const val MIN_BURSTS_FOR_BURSTING_STATE = 2
+        const val SACCADE_REFRACTORY_MS = 450L // 450ms refractory window (400ms~500ms) to merge bipolar double-edges
     }
 
     var signalQuality: EogSignalQuality = EogSignalQuality.OFFLINE
@@ -42,6 +43,38 @@ class EogAdaptationController {
 
     var consecutiveBurstEpochs: Int = 0
         private set
+
+    var lastSaccadePulseTimeMs: Long = 0L
+        private set
+
+    var debouncedBurstCountInEpoch: Int = 0
+        private set
+
+    /**
+     * Filters incoming raw saccade pulse detections using a physiological refractory period (450ms).
+     * Saccadic eye movements in electrooculography naturally create a bipolar voltage excursion:
+     * an initial step followed by a return step / settling jitter within 250~350ms.
+     * This filter merges adjacent pulses within the 400ms~500ms refractory window into one single
+     * eye movement event, preventing double-edge false triggers.
+     *
+     * @param timestampMs Timestamp of the detected pulse
+     * @return true if this is an accepted new eye movement event, false if it is a debounced/suppressed rebound
+     */
+    @Synchronized
+    fun filterSaccadePulse(timestampMs: Long = System.currentTimeMillis()): Boolean {
+        if (lastSaccadePulseTimeMs > 0L && (timestampMs - lastSaccadePulseTimeMs) < SACCADE_REFRACTORY_MS) {
+            Log.d(TAG, "Suppressed rebound saccade pulse within ${SACCADE_REFRACTORY_MS}ms refractory window (${timestampMs - lastSaccadePulseTimeMs}ms)")
+            return false
+        }
+        lastSaccadePulseTimeMs = timestampMs
+        debouncedBurstCountInEpoch++
+        return true
+    }
+
+    /**
+     * Alias for filterSaccadePulse.
+     */
+    fun onSaccadeDetected(timestampMs: Long = System.currentTimeMillis()): Boolean = filterSaccadePulse(timestampMs)
 
     /**
      * Evaluates a 30-second epoch of EOG data with artifact cross-rejection.
@@ -61,6 +94,13 @@ class EogAdaptationController {
         wristMotionMean: Float,
         isBleConnected: Boolean = true
     ): Float {
+        val effectiveBursts = if (debouncedBurstCountInEpoch > 0) {
+            debouncedBurstCountInEpoch
+        } else {
+            burstCount
+        }
+        debouncedBurstCountInEpoch = 0
+
         when {
             // 1. BLE Disconnected
             !isBleConnected -> {
@@ -90,18 +130,18 @@ class EogAdaptationController {
             }
 
             // 4. Clean Eye Movement Bursts (REM Confirmation)
-            burstCount >= MIN_BURSTS_FOR_BURSTING_STATE -> {
+            effectiveBursts >= MIN_BURSTS_FOR_BURSTING_STATE -> {
                 signalQuality = EogSignalQuality.CLEAN_BURSTING
                 consecutiveBurstEpochs++
 
                 // Logit boost scaling:
                 // Base burst gives +1.3f. Each additional burst over threshold adds +0.15f,
                 // plus a consecutive epoch persistence bonus (+0.2f), capped between [+1.2f, +2.2f].
-                val countBonus = ((burstCount - MIN_BURSTS_FOR_BURSTING_STATE) * 0.15f).coerceIn(0.0f, 0.6f)
+                val countBonus = ((effectiveBursts - MIN_BURSTS_FOR_BURSTING_STATE) * 0.15f).coerceIn(0.0f, 0.6f)
                 val persistenceBonus = if (consecutiveBurstEpochs >= 2) 0.2f else 0.0f
                 currentLogitBoost = (1.3f + countBonus + persistenceBonus).coerceIn(1.2f, 2.2f)
 
-                Log.i(TAG, "Clean EOG burst detected (bursts=$burstCount, consecutive=$consecutiveBurstEpochs). Logit boost = +$currentLogitBoost")
+                Log.i(TAG, "Clean EOG burst detected (bursts=$effectiveBursts, consecutive=$consecutiveBurstEpochs). Logit boost = +$currentLogitBoost")
             }
 
             // 5. Clean Resting (Baseline / NREM or quiet intervals)
@@ -120,5 +160,7 @@ class EogAdaptationController {
         signalQuality = EogSignalQuality.OFFLINE
         currentLogitBoost = 0.0f
         consecutiveBurstEpochs = 0
+        lastSaccadePulseTimeMs = 0L
+        debouncedBurstCountInEpoch = 0
     }
 }

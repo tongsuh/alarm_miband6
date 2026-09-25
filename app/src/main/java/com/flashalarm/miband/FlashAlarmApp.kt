@@ -22,7 +22,11 @@ class FlashAlarmApp : Application() {
     val userPreferencesRepository by lazy { UserPreferencesRepository(this) }
     val bleManager by lazy { MiBandBleManager(this, applicationScope) }
     val ecgBleManager by lazy { EcgBleManager(this, applicationScope) }
-    val eogBleManager by lazy { EogBleManager(this, applicationScope) }
+    val eogBleManager by lazy {
+        EogBleManager(this, applicationScope).apply {
+            adaptationController = remEngine.eogController
+        }
+    }
     val audioPlayer by lazy { DreamAudioPlayer(this, applicationScope) }
     val audioAnalyzer by lazy { BreathingAudioAnalyzer(applicationScope) }
     val remEngine by lazy { MultiModalRemEngine(userPreferencesRepository.cueConfig.value) }

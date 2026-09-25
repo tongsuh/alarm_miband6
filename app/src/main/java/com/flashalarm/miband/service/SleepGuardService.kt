@@ -114,6 +114,7 @@ class SleepGuardService : Service() {
     // Cache latest values for epoch evaluation
     private var lastHeartRate = 60
     private var lastHeartRateReceivedTimeMs = 0L
+    private var lastBandReconnectAttemptMs = 0L
     private val epochHeartRateSamples = mutableListOf<Int>()
     private var lastActigraphy = 0.0f
     private val epochActigraphySamples = mutableListOf<Float>()
@@ -189,6 +190,7 @@ class SleepGuardService : Service() {
         isEcgLatchedOff = false
         isShadowWarmingUp = false
         leadsOffStartTimeMs = 0L
+        lastBandReconnectAttemptMs = 0L
         _dualEngineState.value = null
 
         val app = applicationContext as FlashAlarmApp
@@ -389,6 +391,22 @@ class SleepGuardService : Service() {
                     val mlActive = currentCfg.engineMode == com.flashalarm.miband.domain.model.RemEngineMode.ML_MODEL
                     val ecgTarget = currentCfg.ad8232MacAddress.ifBlank { ecgMac }
 
+                    // Mi Band 6 disconnect self-healing watchdog with 10s debounce
+                    val bandTargetMac = prefs.getDeviceMac()
+                    if (_isServiceRunning.value && bandTargetMac.isNotBlank()) {
+                        val bandConnState = app.bleManager.connectionState.value
+                        if (bandConnState == com.flashalarm.miband.domain.model.BleConnectionState.DISCONNECTED) {
+                            if (now - lastBandReconnectAttemptMs >= 10_000L) {
+                                lastBandReconnectAttemptMs = now
+                                Log.w(TAG, "Watchdog detected Mi Band disconnected while service active. Triggering auto-reconnect to $bandTargetMac (10s debounce)...")
+                                val authKey = prefs.getAuthKeyHex()
+                                val use2021 = prefs.getUse2021Protocol()
+                                app.bleManager.setTargetDevice("Mi Smart Band 6", bandTargetMac, authKey, use2021)
+                                app.bleManager.startScanAndConnect(bandTargetMac)
+                            }
+                        }
+                    }
+
                     if (mlActive && ecgTarget.isNotBlank()) {
                         val connState = app.ecgBleManager.connectionState.value
                         if (connState == com.flashalarm.miband.domain.model.BleConnectionState.DISCONNECTED) {
@@ -487,8 +505,8 @@ class SleepGuardService : Service() {
 
                 val (epochMeanHr, epochHrStdDev) = synchronized(epochHeartRateSamples) {
                     val count = epochHeartRateSamples.size
-                    val mean = if (count > 0) epochHeartRateSamples.average().toFloat() else lastHeartRate.toFloat()
-                    val stdDev = if (count > 3) {
+                    val mean = if (count > 0) epochHeartRateSamples.average().toFloat() else -1f
+                    val stdDev = if (count > 3 && mean > 0f) {
                         val variance = epochHeartRateSamples.map { (it - mean) * (it - mean) }.average().toFloat()
                         kotlin.math.sqrt(variance)
                     } else 0f
@@ -508,10 +526,10 @@ class SleepGuardService : Service() {
                 val isEcgActiveAndHealthy = isDualActive && isEcgConnected && !isLeadsOff && (ecgHr in 36..200) && isEcgFresh
 
                 val isHrFresh = lastHeartRateReceivedTimeMs > 0L && (now - lastHeartRateReceivedTimeMs) < 45000L
-                val bandEvaluatedHr = if (isHrFresh) {
+                val bandEvaluatedHr = if (isHrFresh && epochMeanHr > 0f) {
                     epochMeanHr.toInt().coerceIn(36, 220)
                 } else {
-                    lastHeartRate
+                    -1
                 }
 
                 val evaluatedHr = if (!isEcgLatchedOff && !isShadowWarmingUp && isEcgActiveAndHealthy && ecgHr > 0) {
@@ -532,7 +550,7 @@ class SleepGuardService : Service() {
                     isAudioReliable = audioState.isAudioReliable,
                     currentTimeMs = now,
                     peakActigraphy = epochMaxAct,
-                    intraEpochHrStdDev = epochHrStdDev,
+                    intraEpochHrStdDev = if (evaluatedHr > 0) epochHrStdDev else 0f,
                     isEcgPrimary = isEcgPrimary,
                     eogBursts = if (isEogActiveEpoch) eogSummary.burstCount30s else 0,
                     isEogContactOk = if (isEogActiveEpoch) eogSummary.isContactOk else false,
@@ -545,9 +563,11 @@ class SleepGuardService : Service() {
                 val hrIdleMs = if (lastHeartRateReceivedTimeMs > 0L) now - lastHeartRateReceivedTimeMs else 0L
                 if (_isServiceRunning.value && app.bleManager.connectionState.value == com.flashalarm.miband.domain.model.BleConnectionState.CONNECTED) {
                     if (hrIdleMs > 75000L) {
-                        Log.e(TAG, "Mi Band HR stream stalled for ${hrIdleMs}ms (>75s). Underlying GATT client appears locked. Triggering silent reconnect...")
-                        lastHeartRateReceivedTimeMs = now // Reset baseline while reconnect is in progress
-                        app.bleManager.reconnectSilently()
+                        if (now - lastBandReconnectAttemptMs >= 10_000L) {
+                            lastBandReconnectAttemptMs = now
+                            Log.e(TAG, "Mi Band HR stream stalled for ${hrIdleMs}ms (>75s). Underlying GATT client appears locked. Triggering silent reconnect (10s debounce)...")
+                            app.bleManager.reconnectSilently()
+                        }
                     } else if (hrIdleMs > 45000L) {
                         Log.w(TAG, "Mi Band HR stream quiet for ${hrIdleMs}ms (>45s). Stage 1 recovery: sending soft refresh...")
                         app.bleManager.setHeartRateStreamingMode(true, force = true)
@@ -596,7 +616,7 @@ class SleepGuardService : Service() {
                         timestamp = stagingResult.timestamp,
                         cadenceName = methodDescription.ifBlank { activePattern.name },
                         confidence = stagingResult.confidence,
-                        heartRate = lastHeartRate,
+                        heartRate = if (evaluatedHr > 0) evaluatedHr else lastHeartRate,
                         triggerReason = stagingResult.triggerReason
                     )
 

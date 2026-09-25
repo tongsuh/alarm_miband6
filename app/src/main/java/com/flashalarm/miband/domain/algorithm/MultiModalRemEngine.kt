@@ -20,6 +20,7 @@ class MultiModalRemEngine(
     private var sleepOnsetDetectedTimeMs: Long = 0L
     private var isSleepOnsetDetected: Boolean = false
     private var sustainedStillnessEpochs: Int = 0
+    @Volatile
     private var lastCueTriggerTimeMs: Long = 0L
 
     // Dual sliding buffers
@@ -142,6 +143,7 @@ class MultiModalRemEngine(
      * @param isEogContactOk true if EOG skin contact impedance is intact
      * @param isEogClipped true if EOG signal suffered rail-to-rail or pillow contact saturation
      */
+    @Synchronized
     fun evaluateEpoch(
         heartRate: Int,
         actigraphyMagnitude: Float,
@@ -156,7 +158,8 @@ class MultiModalRemEngine(
         isEogClipped: Boolean = false
     ): RemStagingResult {
         // 1. Maintain sliding windows
-        if (heartRate in 36..219) {
+        val isHrAvailable = heartRate in 36..219
+        if (isHrAvailable) {
             shortTermHeartRates.addLast(heartRate)
             if (shortTermHeartRates.size > 6) shortTermHeartRates.removeFirst() // 3 minutes
 
@@ -166,6 +169,11 @@ class MultiModalRemEngine(
             if (!isSleepOnsetDetected && bedtimeSamplesCount < 8) {
                 bedtimeBaselineHr = (bedtimeBaselineHr * bedtimeSamplesCount + heartRate) / (bedtimeSamplesCount + 1)
                 bedtimeSamplesCount++
+            }
+        } else {
+            // Heart rate offline (-1): age out stale short-term samples gradually
+            if (shortTermHeartRates.isNotEmpty()) {
+                shortTermHeartRates.removeFirst()
             }
         }
 
@@ -218,7 +226,13 @@ class MultiModalRemEngine(
         val isVetoedByMovement = isSustainedAwake || isTransientSpikeActive
 
         // 3. Autonomic PPG Heart Rate & Dispersion
-        val shortTermMeanHr = if (shortTermHeartRates.isNotEmpty()) shortTermHeartRates.average().toFloat() else heartRate.toFloat()
+        val shortTermMeanHr = if (shortTermHeartRates.isNotEmpty()) {
+            shortTermHeartRates.average().toFloat()
+        } else if (isHrAvailable) {
+            heartRate.toFloat()
+        } else {
+            0.0f
+        }
 
         val hrVariance = if (shortTermHeartRates.size > 3) {
             val mean = shortTermMeanHr
@@ -228,10 +242,15 @@ class MultiModalRemEngine(
         val hrvCv = if (shortTermMeanHr > 0) (shortTermHrStdDev / shortTermMeanHr) else 0f
 
         // Combined autonomic dispersion: combines intra-epoch micro-instability with 3-minute macro fluctuation
-        val combinedDispersion = kotlin.math.max(intraEpochHrStdDev, shortTermHrStdDev)
+        val combinedDispersion = if (isHrAvailable || shortTermHeartRates.isNotEmpty()) {
+            kotlin.math.max(intraEpochHrStdDev, shortTermHrStdDev)
+        } else {
+            0f
+        }
 
         // Update deep sleep baseline during prolonged quiet, low-HR epochs:
-        if (atoniaScore > 0.85f && combinedDispersion < 1.2f && shortTermMeanHr in 42.0f..82.0f) {
+        // STRICT REQUIREMENT: Only update when fresh HR is available!
+        if (isHrAvailable && atoniaScore > 0.85f && combinedDispersion < 1.2f && shortTermMeanHr in 42.0f..82.0f) {
             deepSleepBaselineHr = if (!baselineEstablished) {
                 baselineEstablished = true
                 shortTermMeanHr
@@ -241,7 +260,7 @@ class MultiModalRemEngine(
         }
 
         // Calculate HR surge over deep sleep baseline using fast 3-minute short-term window:
-        val hrSurgePercent = if (deepSleepBaselineHr > 0) {
+        val hrSurgePercent = if (isHrAvailable && deepSleepBaselineHr > 0 && shortTermMeanHr > 0) {
             ((shortTermMeanHr - deepSleepBaselineHr) / deepSleepBaselineHr).coerceAtLeast(0f)
         } else 0f
 
@@ -339,9 +358,9 @@ class MultiModalRemEngine(
         val wHrv = hrvAdaptationController.onEpochBoundary()
 
         // REM physiological pattern: Autonomic storm surge + intra-epoch or short-term dispersion
-        val isAutonomicSurge = (hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
+        val isAutonomicSurge = isHrAvailable && ((hrSurgePercent >= 0.07f && combinedDispersion >= 1.5f) ||
                 (hrSurgePercent >= 0.11f) ||
-                (combinedDispersion >= 2.0f && hrSurgePercent >= 0.04f)
+                (combinedDispersion >= 2.0f && hrSurgePercent >= 0.04f))
 
         var tentativeStage: SleepStage
         var tentativeRemConfidence = 0.0f
@@ -357,7 +376,7 @@ class MultiModalRemEngine(
                 if (prob >= cueConfig.confidenceThreshold && atoniaScore > 0.45f) {
                     tentativeStage = SleepStage.REM
                     tentativeRemConfidence = prob
-                } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                } else if (isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
                     tentativeStage = SleepStage.DEEP
                     tentativeRemConfidence = 0.0f
                 } else {
@@ -369,7 +388,7 @@ class MultiModalRemEngine(
                 if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
                     tentativeStage = SleepStage.REM
                     tentativeRemConfidence = mlRemProbability
-                } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+                } else if (isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
                     tentativeStage = SleepStage.DEEP
                     tentativeRemConfidence = 0.0f
                 } else {
@@ -400,7 +419,7 @@ class MultiModalRemEngine(
             if (fusedProb >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
                 tentativeStage = SleepStage.REM
                 tentativeRemConfidence = fusedProb
-            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+            } else if (isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
                 tentativeStage = SleepStage.DEEP
                 tentativeRemConfidence = 0.0f
             } else {
@@ -432,7 +451,7 @@ class MultiModalRemEngine(
             if (fusedProb >= effectiveThreshold && atoniaScore > 0.50f) {
                 tentativeStage = SleepStage.REM
                 tentativeRemConfidence = fusedProb
-            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+            } else if (isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
                 tentativeStage = SleepStage.DEEP
                 tentativeRemConfidence = 0.0f
             } else {
@@ -462,7 +481,7 @@ class MultiModalRemEngine(
                 if (multiModalSensorScore >= 0.85f) {
                     tentativeRemConfidence = kotlin.math.max(tentativeRemConfidence, multiModalSensorScore)
                 }
-            } else if (hrSurgePercent < 0.04f && combinedDispersion < 1.1f) {
+            } else if (isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f) {
                 tentativeStage = SleepStage.DEEP
                 tentativeRemConfidence = 0.0f
             } else {
@@ -565,8 +584,8 @@ class MultiModalRemEngine(
         }
 
         // 8. Lucid Dream Cueing Eligibility & Cooldown
-        val cooldownMs = cueConfig.cooldownMinutes * 60 * 1000L
-        val isCooldownPassed = (currentTimeMs - lastCueTriggerTimeMs) >= cooldownMs
+        val cooldownMs = (cueConfig.cooldownMinutes.coerceAtLeast(1) * 60 * 1000L)
+        val isCooldownPassed = lastCueTriggerTimeMs <= 0L || (currentTimeMs >= lastCueTriggerTimeMs && (currentTimeMs - lastCueTriggerTimeMs) >= cooldownMs)
         val isEogBursting = isEogMode && eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING
         val targetConfidenceThreshold = if (isEogBursting) kotlin.math.min(cueConfig.confidenceThreshold, 0.42f) else cueConfig.confidenceThreshold
         val meetsConfidence = remConfidence >= targetConfidenceThreshold

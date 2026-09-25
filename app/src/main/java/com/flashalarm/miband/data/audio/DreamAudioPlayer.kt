@@ -77,8 +77,9 @@ class DreamAudioPlayer(
         val targetVolume = (volumePercent.coerceIn(5, 100) / 100f)
 
         playbackJob = scope.launch(Dispatchers.IO) {
+            val completionDeferred = kotlinx.coroutines.CompletableDeferred<Unit>()
             try {
-                mediaPlayer = MediaPlayer().apply {
+                val player = MediaPlayer().apply {
                     setAudioAttributes(
                         AudioAttributes.Builder()
                             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
@@ -95,41 +96,69 @@ class DreamAudioPlayer(
                         setDataSource(context, defaultUri)
                     }
 
-                    isLooping = true
+                    // Fix: Subconscious whisper should NOT loop aggressively without gap!
+                    isLooping = false
+                    setOnCompletionListener {
+                        completionDeferred.complete(Unit)
+                    }
+                    setOnErrorListener { _, what, extra ->
+                        Log.e(TAG, "MediaPlayer error: what=$what extra=$extra")
+                        completionDeferred.complete(Unit)
+                        true
+                    }
+
                     setVolume(0.05f, 0.05f) // Start faint
                     prepare()
                     start()
                 }
+                mediaPlayer = player
 
-                // Smooth 4-second volume fade-in
-                val fadeSteps = 20
-                val targetVol = targetVolume
+                val trackDurationMs = try { player.duration.toLong() } catch (e: Exception) { -1L }
+                val maxLimitMs = durationSeconds * 1000L
+
+                // Adaptive smooth volume fade-in: short whispers fade in quickly to preserve leading words
+                val fadeInDurationMs = if (trackDurationMs in 1..8000) {
+                    minOf(800L, trackDurationMs / 4L).coerceAtLeast(200L)
+                } else {
+                    2000L
+                }
+                val fadeSteps = (fadeInDurationMs / 100L).toInt().coerceIn(3, 20)
+                val stepDelay = fadeInDurationMs / fadeSteps
+
                 for (step in 1..fadeSteps) {
                     if (!isActive || mediaPlayer == null) break
-                    val currentVol = (targetVol * (step.toFloat() / fadeSteps)).coerceIn(0.05f, 1.0f)
+                    val currentVol = (targetVolume * (step.toFloat() / fadeSteps)).coerceIn(0.05f, 1.0f)
                     try {
                         mediaPlayer?.setVolume(currentVol, currentVol)
                     } catch (e: Exception) {
                         break
                     }
-                    delay(200L)
+                    delay(stepDelay)
                 }
 
-                // Maintain playback until duration expires
-                val totalMs = durationSeconds * 1000L
-                val remainingMs = (totalMs - 4000L).coerceAtLeast(1000L)
-                delay(remainingMs)
-
-                // Smooth 1-second fade out
-                for (step in 5 downTo 1) {
-                    if (!isActive || mediaPlayer == null) break
-                    val currentVol = (targetVol * (step.toFloat() / 5)).coerceIn(0.0f, 1.0f)
-                    try {
-                        mediaPlayer?.setVolume(currentVol, currentVol)
-                    } catch (e: Exception) {
-                        break
+                // If track duration is known and shorter than the max configured duration:
+                // Play once completely and naturally without double-repeating!
+                if (trackDurationMs in 1..maxLimitMs) {
+                    val waitRemainingMs = (trackDurationMs - fadeInDurationMs).coerceAtLeast(0L)
+                    kotlinx.coroutines.withTimeoutOrNull(waitRemainingMs + 1500L) {
+                        completionDeferred.await()
                     }
-                    delay(200L)
+                } else {
+                    // Long ambient audio or unknown duration: maintain playback until max duration expires
+                    val remainingMs = (maxLimitMs - fadeInDurationMs - 1000L).coerceAtLeast(500L)
+                    delay(remainingMs)
+
+                    // Smooth 1-second fade out for capped long tracks
+                    for (step in 5 downTo 1) {
+                        if (!isActive || mediaPlayer == null) break
+                        val currentVol = (targetVolume * (step.toFloat() / 5)).coerceIn(0.0f, 1.0f)
+                        try {
+                            mediaPlayer?.setVolume(currentVol, currentVol)
+                        } catch (e: Exception) {
+                            break
+                        }
+                        delay(200L)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "Playback failed", e)

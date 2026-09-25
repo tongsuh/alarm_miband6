@@ -82,6 +82,8 @@ class EogBleManager(
     var lastPacketReceivedTimeMs: Long = 0L
         private set
     private var watchdogJob: Job? = null
+    var adaptationController: com.flashalarm.miband.domain.algorithm.EogAdaptationController? = null
+    private var localLastSaccadeTimeMs: Long = 0L
 
     // State flows
     private val _connectionState = MutableStateFlow(BleConnectionState.DISCONNECTED)
@@ -458,8 +460,22 @@ class EogBleManager(
         val flags = data[0].toInt() and 0xFF
         val contactOk = (flags and 0x01) != 0
         val isClipped = (flags and 0x02) != 0
-        val saccadeNow = (flags and 0x04) != 0
+        val rawSaccadeNow = (flags and 0x04) != 0
         val noiseWarning = (flags and 0x08) != 0
+
+        // Refractory de-jitter: merge bidirectional return edges within 450ms
+        val saccadeNow = if (rawSaccadeNow) {
+            adaptationController?.filterSaccadePulse(lastPacketReceivedTimeMs) ?: run {
+                if (localLastSaccadeTimeMs == 0L || (lastPacketReceivedTimeMs - localLastSaccadeTimeMs) >= 450L) {
+                    localLastSaccadeTimeMs = lastPacketReceivedTimeMs
+                    true
+                } else {
+                    false
+                }
+            }
+        } else {
+            false
+        }
 
         // Byte 1: burst_count_sec (uint8)
         val burstCount = data[1].toInt() and 0xFF

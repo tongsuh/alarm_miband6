@@ -390,4 +390,81 @@ class MultiModalRemEngineTest {
         // Fast recovery path should immediately transition out of AWAKE in 1 epoch without 60s sticky delay
         assertEquals("Should recover to LIGHT on 1st quiet epoch", SleepStage.LIGHT, recoveredEpoch.stage)
     }
+
+    @Test
+    fun `test offline heart rate minus 1 does not poison queues or trigger fake deep sleep`() {
+        engine.markSleepOnset(0L)
+        // Feed offline heart rate (-1) under motionless actigraphy
+        for (i in 0 until 10) {
+            val epoch = engine.evaluateEpoch(
+                heartRate = -1,
+                actigraphyMagnitude = 0.01f,
+                peakActigraphy = 0.02f,
+                currentTimeMs = 1000L * i
+            )
+            // Even though motionless (high atonia), offline HR must NEVER be staged as DEEP
+            assertTrue("Offline HR (-1) must never trigger DEEP sleep", epoch.stage != SleepStage.DEEP)
+            assertEquals("Offline HR should stay in LIGHT or previous stage", SleepStage.LIGHT, epoch.stage)
+        }
+    }
+
+    @Test
+    fun `test eog adaptation controller refractory period filter suppresses double edge`() {
+        val controller = engine.eogController
+        controller.reset()
+
+        val t0 = 10000L
+        // 1st pulse: initial eye turn (rising edge)
+        val firstAccepted = controller.filterSaccadePulse(t0)
+        assertTrue("First saccade pulse must be accepted", firstAccepted)
+
+        // 2nd pulse: return edge after 200ms (within 450ms refractory period)
+        val secondAccepted = controller.filterSaccadePulse(t0 + 200L)
+        assertFalse("Rebound/return pulse within 450ms must be suppressed", secondAccepted)
+
+        // 3rd pulse: another rebound after 350ms (within 450ms refractory period of t0)
+        val thirdAccepted = controller.filterSaccadePulse(t0 + 350L)
+        assertFalse("Third jitter pulse within 450ms must be suppressed", thirdAccepted)
+
+        // 4th pulse: genuine second eye movement after 500ms (>450ms)
+        val fourthAccepted = controller.filterSaccadePulse(t0 + 500L)
+        assertTrue("Fourth pulse beyond 450ms refractory period must be accepted", fourthAccepted)
+    }
+
+    @Test
+    fun `test strict cooldown enforcement on lucid dream cue`() {
+        engine.markSleepOnset(0L)
+        val timeMs = 80 * 60 * 1000L
+
+        // Satisfy REM and trigger first cue
+        for (i in 0 until 10) {
+            engine.evaluateEpoch(
+                heartRate = 75,
+                actigraphyMagnitude = 0.008f,
+                audioIrregularity = 0.7f,
+                isAudioReliable = true,
+                currentTimeMs = timeMs + (i * 1000L)
+            )
+        }
+
+        val firstCue = engine.evaluateEpoch(
+            heartRate = 76,
+            actigraphyMagnitude = 0.008f,
+            audioIrregularity = 0.7f,
+            isAudioReliable = true,
+            currentTimeMs = timeMs + 15000L
+        )
+        assertTrue("First cue must trigger", firstCue.isDreamCueTriggered)
+
+        // Immediately next epoch (30s later)
+        val immediateNext = engine.evaluateEpoch(
+            heartRate = 76,
+            actigraphyMagnitude = 0.008f,
+            audioIrregularity = 0.7f,
+            isAudioReliable = true,
+            currentTimeMs = timeMs + 45000L
+        )
+        assertFalse("Immediate next epoch must be blocked by cooldown", immediateNext.isDreamCueTriggered)
+        assertTrue(immediateNext.triggerReason.contains("处于击发冷却间隔中"))
+    }
 }
