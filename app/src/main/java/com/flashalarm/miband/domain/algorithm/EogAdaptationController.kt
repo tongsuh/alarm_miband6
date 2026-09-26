@@ -18,7 +18,7 @@ enum class EogSignalQuality(val displayName: String) {
  * Manages opportunistic residual boosting from ESP32-EOG signals for REM sleep staging.
  *
  * Ground rules:
- * 1. Opportunistic Residual Boosting: EOG boosts REM probability when clean saccade bursts occur (+0.50 ~ +0.95 logit).
+ * 1. Opportunistic Residual Boosting: EOG raw boost (+1.20 ~ +1.60 logit), yielding effective boost (+0.50 ~ +0.95 logit) via Hermite soft gating.
  * 2. Never Veto Base Model: When offline, resting, detached, clipped, or contaminated by wrist motion,
  *    EOG weight/boost immediately drops to 0.0f, smoothly falling back to the 1Hz wrist base model.
  * 3. Multi-tier Artifact Gating:

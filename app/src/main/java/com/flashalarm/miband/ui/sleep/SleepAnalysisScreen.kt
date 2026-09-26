@@ -938,7 +938,8 @@ private fun DiagnosticTimelineCard(
                     .background(Color(0xFF1E222D))
             ) {
                 val baseWeight = item.baseRemProb.coerceIn(0.001f, 1f)
-                val boostWeight = item.confidenceBoost.coerceIn(0f, 1f - item.baseRemProb)
+                val maxBoost = (1f - baseWeight).coerceAtLeast(0f)
+                val boostWeight = item.confidenceBoost.coerceIn(0f, maxBoost)
                 val remainingWeight = (1f - (baseWeight + boostWeight)).coerceAtLeast(0.001f)
 
                 if (baseWeight > 0.01f) {
