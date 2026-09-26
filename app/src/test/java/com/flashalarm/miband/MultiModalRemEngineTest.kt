@@ -467,4 +467,170 @@ class MultiModalRemEngineTest {
         assertFalse("Immediate next epoch must be blocked by cooldown", immediateNext.isDreamCueTriggered)
         assertTrue(immediateNext.triggerReason.contains("处于击发冷却间隔中"))
     }
+
+    @Test
+    fun `test calculateSmoothstepGating mathematical properties`() {
+        // Safe deep sleep zone (< 0.12)
+        assertEquals(0.0, engine.calculateSmoothstepGating(0.05), 0.001)
+        assertEquals(0.0, engine.calculateSmoothstepGating(0.119), 0.001)
+
+        // Smooth transition zone (0.12 .. 0.38)
+        val alpha20 = engine.calculateSmoothstepGating(0.20)
+        assertTrue("Alpha at 0.20 should be low (~0.226)", alpha20 in 0.18..0.26)
+
+        val alpha32 = engine.calculateSmoothstepGating(0.32)
+        assertTrue("Alpha at 0.32 should be high (~0.865)", alpha32 in 0.80..0.92)
+
+        // Candidate REM zone (>= 0.38)
+        assertEquals(1.0, engine.calculateSmoothstepGating(0.38), 0.001)
+        assertEquals(1.0, engine.calculateSmoothstepGating(0.85), 0.001)
+    }
+
+    @Test
+    fun `test relative dynamic threshold scaling never inverts low user thresholds`() {
+        // Test Case 1: Sensitive Explore Preset (0.40)
+        val config40 = DreamCueConfig(
+            engineMode = com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI,
+            confidenceThreshold = 0.40f
+        )
+        val relaxed40 = (config40.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
+        assertEquals(0.352f, relaxed40, 0.001f)
+        assertTrue("Relaxed threshold must be strictly lower than user threshold", relaxed40 < config40.confidenceThreshold)
+        assertFalse("Relaxed threshold must NEVER invert upwards to 0.55", relaxed40 >= 0.55f)
+
+        // Test Case 2: Standard Balanced Preset (0.55)
+        val config55 = DreamCueConfig(
+            engineMode = com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI,
+            confidenceThreshold = 0.55f
+        )
+        val relaxed55 = (config55.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
+        assertEquals(0.484f, relaxed55, 0.001f)
+        assertTrue(relaxed55 < config55.confidenceThreshold)
+
+        // Test Case 3: Robust Anti-Disturbance Preset (0.70)
+        val config70 = DreamCueConfig(
+            engineMode = com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI,
+            confidenceThreshold = 0.70f
+        )
+        val relaxed70 = (config70.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
+        assertEquals(0.616f, relaxed70, 0.001f)
+        assertTrue(relaxed70 < config70.confidenceThreshold)
+    }
+
+    @Test
+    fun `test deep sleep slow-wave interlock prevents EOG from triggering false REM`() {
+        val config = DreamCueConfig(
+            engineMode = com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI,
+            cooldownMinutes = 20,
+            sleepOnsetProtectionHours = 0.5f,
+            confidenceThreshold = 0.65f
+        )
+        engine.updateConfig(config)
+        engine.markSleepOnset(0L)
+        val timeMs = 60 * 60 * 1000L
+
+        // Baseline deep sleep established
+        for (i in 0 until 15) {
+            engine.evaluateEpoch(
+                heartRate = 52,
+                actigraphyMagnitude = 0.01f,
+                peakActigraphy = 0.02f,
+                intraEpochHrStdDev = 0.5f,
+                currentTimeMs = timeMs + (i * 30000L)
+            )
+        }
+
+        // Now EOG injects bursts during deep sleep (e.g. pillow contact or slight facial twitch)
+        val epochWithEog = engine.evaluateEpoch(
+            heartRate = 52,
+            actigraphyMagnitude = 0.01f,
+            peakActigraphy = 0.02f,
+            intraEpochHrStdDev = 0.5f,
+            eogBursts = 5,
+            isEogContactOk = true,
+            isEogClipped = false,
+            currentTimeMs = timeMs + (16 * 30000L)
+        )
+
+        // Slow-wave deep sleep interlock must hold!
+        assertEquals("Physiological deep sleep must not be overturned by EOG", SleepStage.DEEP, epochWithEog.stage)
+        assertEquals(0.0f, epochWithEog.confidence, 0.001f)
+        assertFalse("Deep sleep with EOG noise must never trigger cue", epochWithEog.isDreamCueTriggered)
+    }
+
+    @Test
+    fun `test decisive logit boost range in EogAdaptationController`() {
+        val controller = engine.eogController
+        controller.reset()
+
+        // 1. Bursts < 3 (below threshold) -> Clean Resting
+        val boostBelow = controller.updateEpoch(
+            burstCount = 2,
+            isContactOk = true,
+            isClipped = false,
+            wristMotionMean = 0.01f
+        )
+        assertEquals(0.0f, boostBelow, 0.001f)
+        assertEquals(com.flashalarm.miband.domain.algorithm.EogSignalQuality.CLEAN_RESTING, controller.signalQuality)
+
+        // 2. Bursts = 3 (first bursting epoch)
+        val boostFirst = controller.updateEpoch(
+            burstCount = 3,
+            isContactOk = true,
+            isClipped = false,
+            wristMotionMean = 0.01f
+        )
+        assertEquals(com.flashalarm.miband.domain.algorithm.EogSignalQuality.CLEAN_BURSTING, controller.signalQuality)
+        assertEquals(1.20f, boostFirst, 0.01f)
+
+        // 3. Bursts = 6 on 2nd consecutive epoch (max bonus + persistence)
+        val boostMax = controller.updateEpoch(
+            burstCount = 6,
+            isContactOk = true,
+            isClipped = false,
+            wristMotionMean = 0.01f
+        )
+        // 1.20 + (3 * 0.10 = 0.30) + 0.20 = 1.70 -> clamped to 1.60f
+        assertEquals(1.60f, boostMax, 0.01f)
+    }
+
+    @Test
+    fun `test calculateEogSoftGate alias matches calculateSmoothstepGating`() {
+        assertEquals(engine.calculateSmoothstepGating(0.10), engine.calculateEogSoftGate(0.10), 0.0001)
+        assertEquals(engine.calculateSmoothstepGating(0.25), engine.calculateEogSoftGate(0.25), 0.0001)
+        assertEquals(engine.calculateSmoothstepGating(0.50), engine.calculateEogSoftGate(0.50), 0.0001)
+    }
+
+    @Test
+    fun `test algorithm diagnostic metrics faithfully populated in RemStagingResult`() {
+        val config = DreamCueConfig(
+            engineMode = com.flashalarm.miband.domain.model.RemEngineMode.EOG_ASSISTED_AI,
+            confidenceThreshold = 0.55f
+        )
+        engine.updateConfig(config)
+        engine.markSleepOnset(0L)
+        val timeMs = 70 * 60 * 1000L // 70 min post-onset, outside protection
+
+        // Evaluate with active EOG bursts
+        val result = engine.evaluateEpoch(
+            heartRate = 68,
+            actigraphyMagnitude = 0.02f,
+            peakActigraphy = 0.03f,
+            intraEpochHrStdDev = 1.4f,
+            eogBursts = 4,
+            isEogContactOk = true,
+            isEogClipped = false,
+            currentTimeMs = timeMs
+        )
+
+        // Verify diagnostic outputs
+        assertEquals(4, result.eogBursts)
+        assertEquals("CLEAN_BURSTING", result.eogSignalQuality)
+        assertTrue("Raw logit boost should be >= 1.20L", result.rawLogitBoost >= 1.20f)
+        assertTrue("Effective threshold must be >= 0.25f and <= 0.55f", result.effectiveThreshold in 0.25f..0.55f)
+        assertTrue("Trigger reason should describe evaluation state", result.triggerReason.isNotBlank())
+        assertTrue("Timestamp should match evaluation time", result.timestamp == timeMs)
+    }
 }
+
+

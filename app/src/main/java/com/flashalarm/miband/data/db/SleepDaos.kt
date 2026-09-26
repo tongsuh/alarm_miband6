@@ -63,3 +63,24 @@ interface DreamCueDao {
     @Query("DELETE FROM dream_cues WHERE sessionId = :sessionId")
     suspend fun deleteCuesForSession(sessionId: Long)
 }
+
+@Dao
+interface AlgorithmDiagnosticDao {
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDiagnostic(diagnostic: AlgorithmDiagnosticEntity): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertDiagnostics(diagnostics: List<AlgorithmDiagnosticEntity>)
+
+    @Query("SELECT * FROM algorithm_diagnostics WHERE sessionId = :sessionId ORDER BY timestamp ASC")
+    fun getDiagnosticsForSession(sessionId: Long): Flow<List<AlgorithmDiagnosticEntity>>
+
+    @Query("SELECT * FROM algorithm_diagnostics WHERE sessionId = :sessionId ORDER BY timestamp ASC")
+    suspend fun getDiagnosticsListForSession(sessionId: Long): List<AlgorithmDiagnosticEntity>
+
+    @Query("DELETE FROM algorithm_diagnostics WHERE sessionId = :sessionId")
+    suspend fun deleteDiagnosticsForSession(sessionId: Long)
+
+    @Query("DELETE FROM algorithm_diagnostics WHERE timestamp < :cutoffTimestamp")
+    suspend fun deleteOldDiagnostics(cutoffTimestamp: Long)
+}

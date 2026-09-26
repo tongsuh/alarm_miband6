@@ -1,5 +1,9 @@
 package com.flashalarm.miband.ui.sleep
 
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -8,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -38,12 +43,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.flashalarm.miband.R
+import com.flashalarm.miband.data.db.AlgorithmDiagnosticEntity
 import com.flashalarm.miband.data.db.DreamCueEntity
 import com.flashalarm.miband.data.db.SleepSessionEntity
 import com.flashalarm.miband.ui.components.HypnogramChart
@@ -71,16 +78,25 @@ fun SleepAnalysisScreen(
     viewModel: SleepViewModel = viewModel(),
     modifier: Modifier = Modifier
 ) {
+    val context = LocalContext.current
     val allSessions by viewModel.allSessions.collectAsState()
     val selectedSessionId by viewModel.selectedSessionId.collectAsState()
     val selectedSession by viewModel.selectedSession.collectAsState()
     val currentEpochs by viewModel.currentEpochs.collectAsState()
     val currentCues by viewModel.currentCues.collectAsState()
+    val currentDiagnostics by viewModel.currentDiagnostics.collectAsState()
 
     val dateFormat = SimpleDateFormat("MM月dd日", Locale.getDefault())
     val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
 
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+
+    val onCopyAiReport: (String) -> Unit = { reportText ->
+        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as? ClipboardManager
+        val clip = ClipData.newPlainText("FlashAlarm_AI_Diagnostic_Report", reportText)
+        clipboard?.setPrimaryClip(clip)
+        Toast.makeText(context, "已复制 AI 诊断报告，可直接粘贴给 AI 进行分析！", Toast.LENGTH_LONG).show()
+    }
 
     Box(
         modifier = modifier
@@ -600,6 +616,487 @@ private fun LucidDreamCueSummaryCard(
                     }
                 }
             }
+
+            // 7. Algorithm Deep Diagnostic Log (Blackbox Traceability)
+            AlgorithmDiagnosticSection(
+                diagnostics = currentDiagnostics,
+                session = selectedSession,
+                onCopyAiReport = onCopyAiReport
+            )
         }
+    }
+}
+
+@Composable
+private fun AlgorithmDiagnosticSection(
+    diagnostics: List<AlgorithmDiagnosticEntity>,
+    session: SleepSessionEntity?,
+    onCopyAiReport: (String) -> Unit
+) {
+    if (diagnostics.isEmpty()) return
+
+    val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+
+    // Macro Metrics
+    val eogActiveEpochs = diagnostics.filter { it.eogBursts > 0 }
+    val avgBoost = if (eogActiveEpochs.isNotEmpty()) {
+        eogActiveEpochs.map { it.effectiveLogitBoost }.average().toFloat()
+    } else 0f
+
+    val bridgeConversions = diagnostics.count {
+        it.baseRemProb < it.effectiveThreshold && it.fusedRemProb >= it.effectiveThreshold
+    }
+
+    val totalCues = diagnostics.count { it.isCueTriggered }
+
+    // Filter state: 0: Cues, 1: EOG/REM Active, 2: All
+    var selectedFilter by remember { mutableStateOf(0) }
+
+    val filteredList = remember(diagnostics, selectedFilter) {
+        when (selectedFilter) {
+            0 -> diagnostics.filter { it.isCueTriggered }
+            1 -> diagnostics.filter {
+                it.isCueTriggered || it.stage == 1 || it.eogBursts > 0 || it.baseRemProb >= 0.25f || it.fusedRemProb >= 0.40f
+            }
+            else -> diagnostics
+        }
+    }
+
+    Spacer(modifier = Modifier.height(20.dp))
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            // Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "🔬 算法深度诊断 (黑匣子)",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkTextPrimary
+                    )
+                    Text(
+                        text = "1Hz手环AI基座 + EOG残差推力全链路溯源",
+                        fontSize = 11.sp,
+                        color = DarkTextTertiary
+                    )
+                }
+
+                // Copy for AI Button
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(AlertPurple.copy(alpha = 0.2f))
+                        .border(1.dp, AlertPurple.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                        .clickable {
+                            val dateFormat = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault())
+                            val tf = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+                            val report = generateAiDiagnosticReport(session, diagnostics, dateFormat, tf)
+                            onCopyAiReport(report)
+                        }
+                        .padding(horizontal = 10.dp, vertical = 6.dp)
+                ) {
+                    Text(
+                        text = "📋 复制给AI",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = AlertPurple
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 1. Macro Dashboard Cards
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                MacroStatCard(
+                    title = "EOG 平均推力",
+                    value = if (avgBoost > 0) "+${"%.2f".format(avgBoost)}L" else "--",
+                    color = AlertPurple,
+                    modifier = Modifier.weight(1f)
+                )
+                MacroStatCard(
+                    title = "EOG 促成 REM 跃迁",
+                    value = "$bridgeConversions 次",
+                    color = GoldDream,
+                    modifier = Modifier.weight(1f)
+                )
+                MacroStatCard(
+                    title = "触梦击发",
+                    value = "$totalCues 次",
+                    color = Color(0xFF22C55E),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            // 2. Filter Chips
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val cueCount = diagnostics.count { it.isCueTriggered }
+                val activeCount = diagnostics.count {
+                    it.isCueTriggered || it.stage == 1 || it.eogBursts > 0 || it.baseRemProb >= 0.25f || it.fusedRemProb >= 0.40f
+                }
+                DiagnosticFilterChip(
+                    text = "✨ 触梦 ($cueCount)",
+                    isSelected = selectedFilter == 0,
+                    onClick = { selectedFilter = 0 },
+                    modifier = Modifier.weight(1f)
+                )
+                DiagnosticFilterChip(
+                    text = "👁️ EOG/做梦 ($activeCount)",
+                    isSelected = selectedFilter == 1,
+                    onClick = { selectedFilter = 1 },
+                    modifier = Modifier.weight(1f)
+                )
+                DiagnosticFilterChip(
+                    text = "📊 全部 (${diagnostics.size})",
+                    isSelected = selectedFilter == 2,
+                    onClick = { selectedFilter = 2 },
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            // 3. Timeline Items
+            if (filteredList.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "该筛选条件下无记录",
+                        fontSize = 12.sp,
+                        color = DarkTextTertiary
+                    )
+                }
+            } else {
+                val displayItems = if (selectedFilter == 2) filteredList.take(120) else filteredList
+                displayItems.forEachIndexed { idx, item ->
+                    DiagnosticTimelineCard(item = item, timeFormat = timeFormat, epochIndex = idx + 1)
+                    if (idx < displayItems.size - 1) {
+                        Spacer(modifier = Modifier.height(8.dp))
+                    }
+                }
+                if (selectedFilter == 2 && filteredList.size > 120) {
+                    Text(
+                        text = "注：为保持流畅，全部模式仅展示前 120 条记录。点击右上角【📋 复制给AI】可导出完整 ${diagnostics.size} 个周期全量数据！",
+                        fontSize = 11.sp,
+                        color = DarkTextTertiary,
+                        modifier = Modifier.padding(top = 8.dp)
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun MacroStatCard(
+    title: String,
+    value: String,
+    color: Color,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(DarkSurface)
+            .padding(vertical = 8.dp, horizontal = 4.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = value,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = color
+            )
+            Spacer(modifier = Modifier.height(2.dp))
+            Text(
+                text = title,
+                fontSize = 9.sp,
+                color = DarkTextSecondary,
+                maxLines = 1
+            )
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticFilterChip(
+    text: String,
+    isSelected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(8.dp))
+            .background(if (isSelected) AlertPurple else DarkSurface)
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text = text,
+            fontSize = 10.sp,
+            fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
+            color = if (isSelected) Color.White else DarkTextSecondary,
+            maxLines = 1
+        )
+    }
+}
+
+@Composable
+private fun DiagnosticTimelineCard(
+    item: AlgorithmDiagnosticEntity,
+    timeFormat: SimpleDateFormat,
+    epochIndex: Int
+) {
+    val timeStr = timeFormat.format(Date(item.timestamp))
+
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(DarkSurface)
+            .padding(10.dp)
+    ) {
+        Column {
+            // Header Row: Time, Epoch #, Status Badge
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = timeStr,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkTextPrimary
+                    )
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(
+                        text = "#$epochIndex",
+                        fontSize = 10.sp,
+                        color = DarkTextTertiary
+                    )
+                }
+
+                val (badgeText, badgeColor) = when {
+                    item.isCueTriggered -> "✨ 触梦击发成功" to GoldDream
+                    item.isCueEligible -> "⏱️ 冷却间隔拦截" to AlertPurple
+                    item.triggerReason.contains("体动") || item.triggerReason.contains("避让") -> "🛑 动作一票否决" to HeartRateRed
+                    item.stage == 1 -> "👁️ REM 活跃" to StageRemColor
+                    item.stage == 3 -> "🛡️ 慢波深睡保底" to StageDeepColor
+                    item.stage == 0 -> "🌙 清醒期" to StageAwakeColor
+                    else -> "⚪ 浅睡中" to StageLightColor
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(badgeColor.copy(alpha = 0.15f))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                ) {
+                    Text(
+                        text = badgeText,
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = badgeColor
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Confidence Waterfall Bar
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(10.dp)
+                    .clip(RoundedCornerShape(5.dp))
+                    .background(Color(0xFF1E222D))
+            ) {
+                val baseWeight = item.baseRemProb.coerceIn(0.001f, 1f)
+                val boostWeight = item.confidenceBoost.coerceIn(0f, 1f - item.baseRemProb)
+                val remainingWeight = (1f - (baseWeight + boostWeight)).coerceAtLeast(0.001f)
+
+                if (baseWeight > 0.01f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .weight(baseWeight)
+                            .background(Color(0xFF22C55E))
+                    )
+                }
+                if (boostWeight > 0.01f) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxHeight()
+                            .weight(boostWeight)
+                            .background(AlertPurple)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .fillMaxHeight()
+                        .weight(remainingWeight)
+                        .background(Color(0xFF2A2D3A))
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            // Waterfall Legend Row
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = "1Hz基座: ${(item.baseRemProb * 100).toInt()}%",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color(0xFF22C55E)
+                    )
+                    if (item.confidenceBoost > 0.005f) {
+                        Text(
+                            text = " + EOG: +${(item.confidenceBoost * 100).toInt()}%",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = AlertPurple
+                        )
+                    }
+                    Text(
+                        text = " = ${(item.fusedRemProb * 100).toInt()}%",
+                        fontSize = 10.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = DarkTextPrimary
+                    )
+                }
+
+                val isRelaxedTh = item.effectiveThreshold < 0.54f
+                Text(
+                    text = "门槛: ${(item.effectiveThreshold * 100).toInt()}%" + if (isRelaxedTh) " (强爆发下探)" else "",
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = if (isRelaxedTh) GoldDream else DarkTextSecondary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            // Sensor Details
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val surgePercent = (item.hrSurgePercent * 100).toInt()
+                val hrText = if (item.heartRate > 0) "${item.heartRate} bpm (+${surgePercent}%)" else "HR 离线"
+                Text(
+                    text = "🫀 $hrText · 肌张力 ${"%.2f".format(item.atoniaScore)}",
+                    fontSize = 10.sp,
+                    color = DarkTextSecondary
+                )
+
+                val eogDesc = if (item.eogBursts > 0) {
+                    "👁️ EOG: ${item.eogBursts}次 (+${"%.2f".format(item.effectiveLogitBoost)}L)"
+                } else {
+                    "👁️ EOG: 静息"
+                }
+                Text(
+                    text = eogDesc,
+                    fontSize = 10.sp,
+                    color = if (item.eogBursts > 0) AlertPurple else DarkTextTertiary
+                )
+            }
+
+            Spacer(modifier = Modifier.height(4.dp))
+
+            Text(
+                text = "📝 ${item.triggerReason}",
+                fontSize = 10.sp,
+                color = DarkTextTertiary,
+                lineHeight = 13.sp
+            )
+        }
+    }
+}
+
+private fun generateAiDiagnosticReport(
+    session: SleepSessionEntity?,
+    diagnostics: List<AlgorithmDiagnosticEntity>,
+    dateFormat: SimpleDateFormat,
+    timeFormat: SimpleDateFormat
+): String {
+    val dateStr = session?.let { dateFormat.format(Date(it.startTime)) } ?: "最新睡眠"
+    val cues = diagnostics.filter { it.isCueTriggered }
+    val eogActive = diagnostics.filter { it.eogBursts > 0 }
+    val bridgeCount = diagnostics.count { it.baseRemProb < it.effectiveThreshold && it.fusedRemProb >= it.effectiveThreshold }
+    val vetoCount = diagnostics.count { it.triggerReason.contains("体动") || it.triggerReason.contains("避让") }
+
+    val keyDiagnostics = diagnostics.filter {
+        it.isCueTriggered || (it.stage == 1 && it.eogBursts > 0) || it.fusedRemProb >= 0.45f || it.triggerReason.contains("体动")
+    }.take(60)
+
+    return buildString {
+        appendLine("# FlashAlarm 夜间算法决策诊断报告 (AI 审查专用)")
+        appendLine()
+        appendLine("## 1. 运行配置与监测基线")
+        appendLine("- 报告日期: $dateStr")
+        appendLine("- 监测时长: ${diagnostics.size / 2} 分钟 (共 ${diagnostics.size} 个 30s 评估周期)")
+        if (session != null) {
+            appendLine("- 睡眠评分: ${session.sleepScore} 分 | 效率: ${session.efficiency}% | REM: ${session.remMinutes}分 | 深睡: ${session.deepMinutes}分")
+        }
+        appendLine()
+        appendLine("## 2. 宏观多模态协同统计")
+        appendLine("- 触梦击发总计: ${cues.size} 次")
+        appendLine("- EOG 活跃总周期: ${eogActive.size} 个 (${if (diagnostics.isNotEmpty()) (eogActive.size * 100 / diagnostics.size) else 0}%)")
+        appendLine("- EOG 促成 REM 临界跃迁: $bridgeCount 次 (成功突破门槛)")
+        appendLine("- 手腕体动避让拦截: $vetoCount 次")
+        appendLine()
+        appendLine("## 3. 关键诊断时序抽取表 (触梦击发点 + 高价值决策期)")
+        appendLine("| 时间 | 周期 | P_base | EOG脉冲 | α门控 | 有效推力 | P_fused | 门槛 | HR(Surge) | 肌张力 | 决策结果 / 抑制原因 |")
+        appendLine("|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---|")
+
+        val timeFormatSec = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
+        keyDiagnostics.forEachIndexed { idx, d ->
+            val tStr = timeFormatSec.format(Date(d.timestamp))
+            val surgeStr = "+${(d.hrSurgePercent * 100).toInt()}%"
+            val cueFlag = if (d.isCueTriggered) "✨ " else ""
+            val thFlag = if (d.effectiveThreshold < 0.54f) "*" else ""
+            appendLine("| $tStr | #${idx + 1} | ${"%.2f".format(d.baseRemProb)} | ${d.eogBursts} | ${"%.2f".format(d.alphaGating)} | +${"%.2f".format(d.effectiveLogitBoost)}L | ${"%.2f".format(d.fusedRemProb)} | ${"%.2f".format(d.effectiveThreshold)}$thFlag | ${d.heartRate} ($surgeStr) | ${"%.2f".format(d.atoniaScore)} | $cueFlag${d.triggerReason} |")
+        }
+
+        appendLine()
+        appendLine("*(注: 门槛带 * 表示持续眼动爆发自适应相对下探生效)*")
+        appendLine()
+        appendLine("## 4. 给 AI 助手的问题引导")
+        appendLine("请根据以上夜间生理与算法多模态数据进行专业审查：")
+        appendLine("1. 评估当前的置信门槛设定与 EOG 推力系数是否匹配？是否存在过敏或失敏？")
+        appendLine("2. 分析表中的动量抑制或未触发周期，是否存在 REM 期微弱眼动被漏判？")
+        appendLine("3. 结合用户的心率浪涌与肌张力表现，给出个性化参数调优建议（如置信门槛、冷却时间、爆发阈值）。")
     }
 }

@@ -1,5 +1,7 @@
 package com.flashalarm.miband.data.repository
 
+import com.flashalarm.miband.data.db.AlgorithmDiagnosticDao
+import com.flashalarm.miband.data.db.AlgorithmDiagnosticEntity
 import com.flashalarm.miband.data.db.DreamCueDao
 import com.flashalarm.miband.data.db.DreamCueEntity
 import com.flashalarm.miband.data.db.SleepDatabase
@@ -20,6 +22,7 @@ class SleepRepository(
     private val sessionDao: SleepSessionDao = database.sleepSessionDao()
     private val epochDao: SleepEpochDao = database.sleepEpochDao()
     private val cueDao: DreamCueDao = database.dreamCueDao()
+    private val diagnosticDao: AlgorithmDiagnosticDao = database.algorithmDiagnosticDao()
 
     val allSessions: Flow<List<SleepSessionEntity>> = sessionDao.getAllSessions()
     val latestSession: Flow<SleepSessionEntity?> = sessionDao.getLatestSession()
@@ -29,6 +32,9 @@ class SleepRepository(
 
     fun getCuesForSession(sessionId: Long): Flow<List<DreamCueEntity>> =
         cueDao.getCuesForSession(sessionId)
+
+    fun getDiagnosticsForSession(sessionId: Long): Flow<List<AlgorithmDiagnosticEntity>> =
+        diagnosticDao.getDiagnosticsForSession(sessionId)
 
     suspend fun getSessionById(sessionId: Long): SleepSessionEntity? = withContext(Dispatchers.IO) {
         sessionDao.getSessionById(sessionId)
@@ -96,6 +102,14 @@ class SleepRepository(
 
     suspend fun markCueAcknowledged(cueId: Long) = withContext(Dispatchers.IO) {
         cueDao.markCueAcknowledged(cueId)
+    }
+
+    suspend fun recordAlgorithmDiagnostic(diagnostic: AlgorithmDiagnosticEntity): Long = withContext(Dispatchers.IO) {
+        diagnosticDao.insertDiagnostic(diagnostic)
+    }
+
+    suspend fun deleteOldDiagnostics(cutoffTimestamp: Long) = withContext(Dispatchers.IO) {
+        diagnosticDao.deleteOldDiagnostics(cutoffTimestamp)
     }
 
     suspend fun finalizeSession(sessionId: Long, endTimeMs: Long = System.currentTimeMillis()) =
@@ -267,6 +281,7 @@ class SleepRepository(
     suspend fun deleteSession(sessionId: Long) = withContext(Dispatchers.IO) {
         cueDao.deleteCuesForSession(sessionId)
         epochDao.deleteEpochsForSession(sessionId)
+        diagnosticDao.deleteDiagnosticsForSession(sessionId)
         sessionDao.deleteSession(sessionId)
     }
 
@@ -296,6 +311,7 @@ class SleepRepository(
 
         // Generate hypnogram step epochs
         val epochs = mutableListOf<SleepEpochEntity>()
+        val diagnostics = mutableListOf<AlgorithmDiagnosticEntity>()
         val totalMinutes = 444
         val random = Random(42)
 
@@ -343,8 +359,80 @@ class SleepRepository(
                     confidence = if (stage == SleepStage.REM) 0.94f else 0.0f
                 )
             )
+
+            // Seed diagnostic records for every 2 minutes (or every minute during active windows)
+            val isRem = stage == SleepStage.REM
+            val isCue = (m == 125 || m == 250 || m == 375)
+            val baseProb = when (stage) {
+                SleepStage.REM -> 0.36f + (random.nextFloat() * 0.24f)
+                SleepStage.LIGHT -> 0.16f + (random.nextFloat() * 0.12f)
+                SleepStage.DEEP -> 0.02f + (random.nextFloat() * 0.04f)
+                SleepStage.AWAKE -> 0.01f + (random.nextFloat() * 0.02f)
+            }
+            val bursts = when {
+                isCue -> 4 + random.nextInt(5)
+                isRem && random.nextFloat() > 0.4f -> 3 + random.nextInt(4)
+                isRem -> 1
+                stage == SleepStage.LIGHT && random.nextFloat() > 0.88f -> 1
+                else -> 0
+            }
+            val quality = when {
+                bursts >= 3 -> "CLEAN_BURSTING"
+                bursts > 0 -> "CLEAN_RESTING"
+                else -> "CLEAN_RESTING"
+            }
+            val alpha = when {
+                baseProb < 0.12f -> 0f
+                baseProb > 0.38f -> 1f
+                else -> {
+                    val t = (baseProb - 0.12f) / 0.26f
+                    t * t * (3f - 2f * t)
+                }
+            }
+            val rawBoost = if (bursts >= 3) 1.20f + ((bursts - 3) * 0.10f).coerceAtMost(0.40f) else 0f
+            val effectiveBoost = rawBoost * alpha
+            val baseLogit = kotlin.math.ln(baseProb.coerceIn(0.001f, 0.999f) / (1f - baseProb.coerceIn(0.001f, 0.999f)))
+            val fusedLogit = baseLogit + effectiveBoost
+            val fusedProb = (1.0 / (1.0 + kotlin.math.exp(-fusedLogit.toDouble()))).toFloat()
+            val confBoost = (fusedProb - baseProb).coerceAtLeast(0f)
+            val effThreshold = if (bursts >= 3) 0.484f else 0.55f
+            val isEligible = isRem && fusedProb >= effThreshold
+
+            val triggerReason = when {
+                isCue -> "✨ 触梦击发成功 (EOG眼动爆发+1Hz基座共振)"
+                isRem && fusedProb >= effThreshold -> "做梦期监测中 (双模态高置信度命中)"
+                isRem -> "做梦期潜伏 (置信度不足 ${(fusedProb * 100).toInt()}% < ${(effThreshold * 100).toInt()}%)"
+                stage == SleepStage.DEEP -> "慢波深度睡眠 (深睡保底)"
+                stage == SleepStage.AWAKE -> "清醒状态"
+                else -> "浅睡阶段"
+            }
+
+            diagnostics.add(
+                AlgorithmDiagnosticEntity(
+                    sessionId = sessionId,
+                    timestamp = epochTime,
+                    stage = stage.code,
+                    heartRate = hrBase,
+                    hrSurgePercent = if (isRem) 0.10f + (random.nextFloat() * 0.12f) else 0.02f,
+                    atoniaScore = if (stage == SleepStage.AWAKE) 0.25f else 0.94f,
+                    baseRemProb = baseProb,
+                    eogBursts = bursts,
+                    eogSignalQuality = quality,
+                    alphaGating = alpha,
+                    rawLogitBoost = rawBoost,
+                    effectiveLogitBoost = effectiveBoost,
+                    fusedRemProb = fusedProb,
+                    confidenceBoost = confBoost,
+                    effectiveThreshold = effThreshold,
+                    isCueTriggered = isCue,
+                    isCueEligible = isEligible,
+                    consecutiveRemCount = if (isRem) 3 else 0,
+                    triggerReason = triggerReason
+                )
+            )
         }
         epochDao.insertEpochs(epochs)
+        diagnosticDao.insertDiagnostics(diagnostics)
 
         // Seed 3 precise dream cues in the REM windows
         cueDao.insertCue(

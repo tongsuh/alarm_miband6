@@ -365,6 +365,16 @@ class MultiModalRemEngine(
         var tentativeStage: SleepStage
         var tentativeRemConfidence = 0.0f
 
+        var diagBaseRemProb = mlRemProbability ?: 0f
+        var diagEogBursts = 0
+        var diagEogSignalQuality = "OFFLINE"
+        var diagAlphaGating = 0f
+        var diagRawLogitBoost = 0f
+        var diagEffectiveLogitBoost = 0f
+        var diagFusedRemProb = 0f
+        var diagConfidenceBoost = 0f
+        var diagEffectiveThreshold = cueConfig.confidenceThreshold
+
         if (isSustainedAwake) {
             tentativeStage = SleepStage.AWAKE
             tentativeRemConfidence = 0.0f
@@ -373,6 +383,8 @@ class MultiModalRemEngine(
             val isPaawsActive = hrvRemProbability != null && !isShadowPreWarming && isEcgPrimary
             if (isPaawsActive) {
                 val prob = hrvRemProbability!!
+                diagFusedRemProb = prob
+                diagConfidenceBoost = (prob - diagBaseRemProb).coerceAtLeast(0f)
                 if (prob >= cueConfig.confidenceThreshold && atoniaScore > 0.45f) {
                     tentativeStage = SleepStage.REM
                     tentativeRemConfidence = prob
@@ -385,6 +397,8 @@ class MultiModalRemEngine(
                 }
             } else if (mlRemProbability != null) {
                 // Hot-Standby Failover for AD8232_DUAL mode
+                diagFusedRemProb = mlRemProbability
+                diagConfidenceBoost = 0f
                 if (mlRemProbability >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
                     tentativeStage = SleepStage.REM
                     tentativeRemConfidence = mlRemProbability
@@ -398,6 +412,7 @@ class MultiModalRemEngine(
             } else {
                 tentativeStage = SleepStage.LIGHT
                 tentativeRemConfidence = 0.10f
+                diagFusedRemProb = 0.10f
             }
         } else if (isMlMode && mlRemProbability != null) {
             // Option 2: 1Hz Band AI Base + Opportunistic 8232 True-HRV Dynamic Residual Gain
@@ -411,10 +426,16 @@ class MultiModalRemEngine(
                 val deltaLogit = hrvLogit - baseLogit
                 val fusedLogit = baseLogit + (wHrv * deltaLogit)
                 val p = 1.0 / (1.0 + kotlin.math.exp(-fusedLogit))
+                diagAlphaGating = wHrv
+                diagRawLogitBoost = deltaLogit.toFloat()
+                diagEffectiveLogitBoost = (wHrv * deltaLogit).toFloat()
                 p.toFloat()
             } else {
                 mlRemProbability
             }
+
+            diagFusedRemProb = fusedProb
+            diagConfidenceBoost = (fusedProb - mlRemProbability).coerceAtLeast(0f)
 
             if (fusedProb >= cueConfig.confidenceThreshold && atoniaScore > 0.50f) {
                 tentativeStage = SleepStage.REM
@@ -428,7 +449,7 @@ class MultiModalRemEngine(
             }
         } else if (isEogMode && mlRemProbability != null) {
             // Option 4: 1Hz Band AI Base + Opportunistic ESP32-EOG Residual Boosting
-            val logitBoost = eogController.updateEpoch(
+            val rawLogitBoost = eogController.updateEpoch(
                 burstCount = eogBursts,
                 isContactOk = isEogContactOk,
                 isClipped = isEogClipped,
@@ -436,22 +457,44 @@ class MultiModalRemEngine(
             )
 
             val pBase = mlRemProbability.toDouble().coerceIn(0.0001, 0.9999)
+            val alphaGating = calculateSmoothstepGating(pBase)
+            val effectiveLogitBoost = rawLogitBoost * alphaGating
+
+            // Physiological slow-wave stability check
+            val isSlowWaveStable = isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f
+
+            // Soft conflict attenuation: If heart rate shows slow-wave stability but EOG bursts occur,
+            // attenuate the effective boost rather than hard-killing the state machine, preserving Tonic REM transitions.
+            val conflictFactor = if (isSlowWaveStable) 0.50f else 1.0f
+            val finalLogitBoost = effectiveLogitBoost * conflictFactor
+
             val baseLogit = kotlin.math.ln(pBase / (1.0 - pBase))
-            val fusedLogit = baseLogit + logitBoost
+            val fusedLogit = baseLogit + finalLogitBoost
             val p = 1.0 / (1.0 + kotlin.math.exp(-fusedLogit))
             val fusedProb = p.toFloat()
 
-            // Adaptive threshold dip: drops to 0.42 when clean eye saccade bursts are active
-            val effectiveThreshold = if (eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING) {
-                kotlin.math.min(cueConfig.confidenceThreshold, 0.42f)
+            // Relative threshold adaptation: under sustained EOG bursts (>=2 epochs),
+            // relax threshold by 12% relatively (e.g. 0.70->0.616, 0.55->0.484, 0.40->0.352), never inverting user choice!
+            val isSustainedEogBurst = eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING && eogController.consecutiveBurstEpochs >= 2
+            val effectiveThreshold = if (isSustainedEogBurst) {
+                (cueConfig.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
             } else {
                 cueConfig.confidenceThreshold
             }
 
+            diagEogBursts = eogBursts
+            diagEogSignalQuality = eogController.signalQuality.name
+            diagAlphaGating = alphaGating.toFloat()
+            diagRawLogitBoost = rawLogitBoost
+            diagEffectiveLogitBoost = finalLogitBoost.toFloat()
+            diagFusedRemProb = fusedProb
+            diagConfidenceBoost = (fusedProb - mlRemProbability).coerceAtLeast(0f)
+            diagEffectiveThreshold = effectiveThreshold
+
             if (fusedProb >= effectiveThreshold && atoniaScore > 0.50f) {
                 tentativeStage = SleepStage.REM
                 tentativeRemConfidence = fusedProb
-            } else if (isHrAvailable && hrSurgePercent < 0.04f && combinedDispersion < 1.1f && atoniaScore > 0.80f) {
+            } else if (isSlowWaveStable) {
                 tentativeStage = SleepStage.DEEP
                 tentativeRemConfidence = 0.0f
             } else {
@@ -534,8 +577,8 @@ class MultiModalRemEngine(
             // Entering REM strictly requires 3 consecutive epochs (90 seconds).
             val requiredConfirmEpochs = when {
                 tentativeStage == SleepStage.REM -> {
-                    if (isEogMode && eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING) {
-                        2 // 60 seconds fast confirmation under verified EOG eye movement bursts
+                    if (isEogMode && eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING && eogController.consecutiveBurstEpochs >= 2 && (mlRemProbability ?: 0f) >= 0.40f) {
+                        2 // 60 seconds fast confirmation only under strong sustained EOG bursts AND base >= 0.40
                     } else {
                         3 // 90 seconds consecutive REM smoothing
                     }
@@ -587,7 +630,12 @@ class MultiModalRemEngine(
         val cooldownMs = (cueConfig.cooldownMinutes.coerceAtLeast(1) * 60 * 1000L)
         val isCooldownPassed = lastCueTriggerTimeMs <= 0L || (currentTimeMs >= lastCueTriggerTimeMs && (currentTimeMs - lastCueTriggerTimeMs) >= cooldownMs)
         val isEogBursting = isEogMode && eogController.signalQuality == EogSignalQuality.CLEAN_BURSTING
-        val targetConfidenceThreshold = if (isEogBursting) kotlin.math.min(cueConfig.confidenceThreshold, 0.42f) else cueConfig.confidenceThreshold
+        val isSustainedEogBurst = isEogBursting && eogController.consecutiveBurstEpochs >= 2
+        val targetConfidenceThreshold = if (isSustainedEogBurst) {
+            (cueConfig.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
+        } else {
+            cueConfig.confidenceThreshold
+        }
         val meetsConfidence = remConfidence >= targetConfidenceThreshold
 
         val isEligible = determinedStage == SleepStage.REM &&
@@ -613,7 +661,8 @@ class MultiModalRemEngine(
                     }
                 } else if (isEogMode && mlRemProbability != null) {
                     if (isEogBursting) {
-                        "👁️ EOG 眼动爆发强化命中REM期 (残差推力 +${"%.1f".format(eogController.currentLogitBoost)} | 置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(targetConfidenceThreshold * 100).toInt()}%)"
+                        val effectiveBoost = eogController.currentLogitBoost * calculateSmoothstepGating(mlRemProbability.toDouble())
+                        "👁️ EOG 眼动爆发强化命中REM期 (有效推力 +${"%.2f".format(effectiveBoost)} | 置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(targetConfidenceThreshold * 100).toInt()}%)"
                     } else {
                         "🤖 1Hz AI 基座 (EOG ${eogController.signalQuality.displayName}) 命中REM期 (置信度 ${(remConfidence * 100).toInt()}% >= 门槛 ${(cueConfig.confidenceThreshold * 100).toInt()}%)"
                     }
@@ -634,6 +683,12 @@ class MultiModalRemEngine(
             lastCueTriggerTimeMs = currentTimeMs
         }
 
+        val consecutiveRemCount = if (determinedStage == SleepStage.REM) {
+            if (lastEstablishedStage == SleepStage.REM) 3 else pendingStageCount
+        } else {
+            0
+        }
+
         return RemStagingResult(
             stage = determinedStage,
             confidence = remConfidence,
@@ -650,6 +705,16 @@ class MultiModalRemEngine(
             isSleepOnsetDetected = isSleepOnsetDetected,
             protectionRemainingMinutes = protectionRemainingMinutes,
             sleepOnsetDetectedTimeMs = sleepOnsetDetectedTimeMs,
+            baseRemProb = diagBaseRemProb,
+            eogBursts = diagEogBursts,
+            eogSignalQuality = diagEogSignalQuality,
+            alphaGating = diagAlphaGating,
+            rawLogitBoost = diagRawLogitBoost,
+            effectiveLogitBoost = diagEffectiveLogitBoost,
+            fusedRemProb = if (diagFusedRemProb > 0f) diagFusedRemProb else remConfidence,
+            confidenceBoost = diagConfidenceBoost,
+            effectiveThreshold = diagEffectiveThreshold,
+            consecutiveRemCount = consecutiveRemCount,
             timestamp = currentTimeMs
         )
     }
@@ -679,6 +744,21 @@ class MultiModalRemEngine(
 
         return (phasePrior * cycleMultiplier).coerceIn(0.05f, 0.95f)
     }
+
+    /**
+     * Hermite Smoothstep Gating factor alpha(pBase) for EOG residual boosting:
+     * - pBase < 0.12: 0.0 (Safety interlock: deep sleep or clear wakefulness, strictly zero boost)
+     * - 0.12 <= pBase <= 0.38: Smooth Hermite interpolation 3t^2 - 2t^3, where t = (pBase - 0.12) / 0.26
+     * - pBase > 0.38: 1.0 (Full boosting allowed when base model already detects candidate REM morphology)
+     */
+    fun calculateSmoothstepGating(pBase: Double): Double {
+        if (pBase < 0.12) return 0.0
+        if (pBase > 0.38) return 1.0
+        val t = (pBase - 0.12) / 0.26
+        return t * t * (3.0 - 2.0 * t)
+    }
+
+    fun calculateEogSoftGate(pBase: Double): Double = calculateSmoothstepGating(pBase)
 
     fun markSleepOnset(onsetMs: Long) {
         isSleepOnsetDetected = true

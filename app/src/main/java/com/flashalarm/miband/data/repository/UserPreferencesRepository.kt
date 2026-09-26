@@ -45,6 +45,8 @@ class UserPreferencesRepository(context: Context) {
         private const val KEY_ENABLE_EOG_DEVICE = "pref_enable_eog_device"
         private const val KEY_EOG_MAC = "pref_eog_mac"
         private const val KEY_EOG_NAME = "pref_eog_name"
+        private const val KEY_ENABLE_DIAGNOSTICS = "pref_enable_algorithm_diagnostics"
+        private const val KEY_DIAGNOSTIC_RETENTION_DAYS = "pref_diagnostic_retention_days"
     }
 
     private val _cueConfig = MutableStateFlow(loadCueConfig())
@@ -90,6 +92,8 @@ class UserPreferencesRepository(context: Context) {
             .putBoolean(KEY_ENABLE_EOG_DEVICE, config.enableEogDevice)
             .putString(KEY_EOG_MAC, config.eogMacAddress)
             .putString(KEY_EOG_NAME, config.eogDeviceName)
+            .putBoolean(KEY_ENABLE_DIAGNOSTICS, config.enableAlgorithmDiagnostics)
+            .putInt(KEY_DIAGNOSTIC_RETENTION_DAYS, config.diagnosticRetentionDays)
             .apply()
 
         _cueConfig.value = config
@@ -143,7 +147,9 @@ class UserPreferencesRepository(context: Context) {
             ad8232DeviceName = prefs.getString(KEY_AD8232_NAME, "FlashAlarm-ECG") ?: "FlashAlarm-ECG",
             enableEogDevice = prefs.getBoolean(KEY_ENABLE_EOG_DEVICE, false),
             eogMacAddress = prefs.getString(KEY_EOG_MAC, "") ?: "",
-            eogDeviceName = prefs.getString(KEY_EOG_NAME, "FlashAlarm-EOG") ?: "FlashAlarm-EOG"
+            eogDeviceName = prefs.getString(KEY_EOG_NAME, "FlashAlarm-EOG") ?: "FlashAlarm-EOG",
+            enableAlgorithmDiagnostics = prefs.getBoolean(KEY_ENABLE_DIAGNOSTICS, true),
+            diagnosticRetentionDays = prefs.getInt(KEY_DIAGNOSTIC_RETENTION_DAYS, 30)
         )
     }
 

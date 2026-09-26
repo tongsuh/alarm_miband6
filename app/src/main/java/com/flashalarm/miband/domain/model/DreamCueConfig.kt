@@ -85,7 +85,11 @@ data class DreamCueConfig(
     // 6. External EOG Device (ESP32-EOG)
     val enableEogDevice: Boolean = false,
     val eogMacAddress: String = "",
-    val eogDeviceName: String = "FlashAlarm-EOG"
+    val eogDeviceName: String = "FlashAlarm-EOG",
+
+    // 7. Algorithm Deep Diagnostics
+    val enableAlgorithmDiagnostics: Boolean = true,
+    val diagnosticRetentionDays: Int = 30
 ) {
     fun getActivePattern(): CustomizableVibrationPattern {
         return patterns.firstOrNull { it.id == activePatternId } ?: patterns.first()

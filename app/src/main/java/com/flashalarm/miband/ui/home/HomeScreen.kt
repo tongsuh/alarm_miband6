@@ -1508,8 +1508,9 @@ private fun DreamCueConfigCard(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text("EOG 辅助 AI 置信度与残差配置", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = DarkTextPrimary)
+                        val burstThreshold = (cueConfig.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
                         Text(
-                            text = "${(cueConfig.confidenceThreshold * 100).toInt()}% 常规门槛 (爆发下探至42%)",
+                            text = "${(cueConfig.confidenceThreshold * 100).toInt()}% 常规门槛 (强爆发下探至${(burstThreshold * 100).toInt()}%)",
                             fontSize = 11.sp,
                             fontWeight = FontWeight.Bold,
                             color = AlertPurple
@@ -1579,12 +1580,61 @@ private fun DreamCueConfigCard(
                         valueRange = 0.30f..0.85f,
                         colors = SliderDefaults.colors(thumbColor = AlertPurple, activeTrackColor = AlertPurple)
                     )
+                    val burstTh = (cueConfig.confidenceThreshold * 0.88f).coerceAtLeast(0.25f)
                     Text(
-                        text = "💡 提示：EOG 辅助 AI 架构以 1Hz 手环 AI 为稳固基座。当检测到干净的眼球快速运动爆发（Saccade Burst）时，Logit 残差推力（+1.2 ~ +2.2）注入模型，置信门槛自适应下探至 0.42，迟滞确认从 3 个 Epoch 缩短至 2 个 Epoch（60秒）。电极脱落或翻身时瞬时归零，平滑兜底退化为手环 AI。",
+                        text = "💡 提示：EOG 辅助 AI 架构以 1Hz 手环 AI 为稳固基座。当检测到干净的快速眼球运动爆发（Saccade Burst，3+次）时，Logit 残差推力（+1.2 ~ +1.6）结合软门控注入模型，置信门槛相对温和下探12%（当前降至${(burstTh * 100).toInt()}%）。电极脱落、饱和截波或手腕翻身时瞬时归零，平滑兜底退化为手环 AI。",
                         fontSize = 10.sp,
                         color = DarkTextTertiary,
                         lineHeight = 14.sp
                     )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DarkSurface)
+                    .clickable {
+                        onConfigChange(cueConfig.copy(enableAlgorithmDiagnostics = !cueConfig.enableAlgorithmDiagnostics))
+                    }
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "🔬 夜间算法深度诊断日志",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = DarkTextPrimary
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(if (cueConfig.enableAlgorithmDiagnostics) AlertPurple.copy(alpha = 0.2f) else DarkSurfaceElevated)
+                                    .padding(horizontal = 5.dp, vertical = 1.dp)
+                            ) {
+                                Text(
+                                    text = if (cueConfig.enableAlgorithmDiagnostics) "已开启" else "已暂停",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = if (cueConfig.enableAlgorithmDiagnostics) AlertPurple else DarkTextTertiary
+                                )
+                            }
+                        }
+                        Text(
+                            text = "逐周期记录 1Hz AI、EOG 脉冲推力与门控否决原因，便于在睡眠报告中一键导出给 AI 审查",
+                            fontSize = 10.sp,
+                            color = DarkTextTertiary
+                        )
+                    }
                 }
             }
         }

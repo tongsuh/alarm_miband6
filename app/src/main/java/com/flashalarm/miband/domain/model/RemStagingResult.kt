@@ -22,5 +22,15 @@ data class RemStagingResult(
     val isSleepOnsetDetected: Boolean = false,
     val protectionRemainingMinutes: Int = 0,
     val sleepOnsetDetectedTimeMs: Long = 0L,
+    val baseRemProb: Float = 0f,
+    val eogBursts: Int = 0,
+    val eogSignalQuality: String = "CLEAN_RESTING",
+    val alphaGating: Float = 0f,
+    val rawLogitBoost: Float = 0f,
+    val effectiveLogitBoost: Float = 0f,
+    val fusedRemProb: Float = 0f,
+    val confidenceBoost: Float = 0f,
+    val effectiveThreshold: Float = 0.65f,
+    val consecutiveRemCount: Int = 0,
     val timestamp: Long = System.currentTimeMillis()
 )

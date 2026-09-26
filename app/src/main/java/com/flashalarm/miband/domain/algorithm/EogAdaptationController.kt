@@ -18,7 +18,7 @@ enum class EogSignalQuality(val displayName: String) {
  * Manages opportunistic residual boosting from ESP32-EOG signals for REM sleep staging.
  *
  * Ground rules:
- * 1. Opportunistic Residual Boosting: EOG boosts REM probability when clean saccade bursts occur (+1.2 ~ +2.2 logit).
+ * 1. Opportunistic Residual Boosting: EOG boosts REM probability when clean saccade bursts occur (+0.50 ~ +0.95 logit).
  * 2. Never Veto Base Model: When offline, resting, detached, clipped, or contaminated by wrist motion,
  *    EOG weight/boost immediately drops to 0.0f, smoothly falling back to the 1Hz wrist base model.
  * 3. Multi-tier Artifact Gating:
@@ -31,7 +31,7 @@ class EogAdaptationController {
     companion object {
         private const val TAG = "EogAdaptation"
         const val WRIST_MOTION_SUPPRESSION_THRESHOLD_G = 0.09f
-        const val MIN_BURSTS_FOR_BURSTING_STATE = 2
+        const val MIN_BURSTS_FOR_BURSTING_STATE = 3
         const val SACCADE_REFRACTORY_MS = 450L // 450ms refractory window (400ms~500ms) to merge bipolar double-edges
     }
 
@@ -134,12 +134,13 @@ class EogAdaptationController {
                 signalQuality = EogSignalQuality.CLEAN_BURSTING
                 consecutiveBurstEpochs++
 
-                // Logit boost scaling:
-                // Base burst gives +1.3f. Each additional burst over threshold adds +0.15f,
-                // plus a consecutive epoch persistence bonus (+0.2f), capped between [+1.2f, +2.2f].
-                val countBonus = ((effectiveBursts - MIN_BURSTS_FOR_BURSTING_STATE) * 0.15f).coerceIn(0.0f, 0.6f)
-                val persistenceBonus = if (consecutiveBurstEpochs >= 2) 0.2f else 0.0f
-                currentLogitBoost = (1.3f + countBonus + persistenceBonus).coerceIn(1.2f, 2.2f)
+                // Decisive, morphology-gated Logit boost scaling:
+                // When clean saccades are validated (3+ bursts, no motion, no clipping),
+                // base burst gives +1.20f. Each additional burst over threshold adds +0.10f,
+                // plus a consecutive epoch persistence bonus (+0.20f), capped between [+1.20f, +1.60f].
+                val countBonus = ((effectiveBursts - MIN_BURSTS_FOR_BURSTING_STATE) * 0.10f).coerceIn(0.0f, 0.40f)
+                val persistenceBonus = if (consecutiveBurstEpochs >= 2) 0.20f else 0.0f
+                currentLogitBoost = (1.20f + countBonus + persistenceBonus).coerceIn(1.20f, 1.60f)
 
                 Log.i(TAG, "Clean EOG burst detected (bursts=$effectiveBursts, consecutive=$consecutiveBurstEpochs). Logit boost = +$currentLogitBoost")
             }

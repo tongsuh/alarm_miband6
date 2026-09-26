@@ -227,6 +227,10 @@ class SleepGuardService : Service() {
 
             // 2. Start REM Engine
             val config = app.userPreferencesRepository.cueConfig.value
+            if (config.enableAlgorithmDiagnostics) {
+                val cutoff = System.currentTimeMillis() - (config.diagnosticRetentionDays * 24 * 3600 * 1000L)
+                app.sleepRepository.deleteOldDiagnostics(cutoff)
+            }
             app.remEngine.updateConfig(config)
             app.remEngine.startSession()
 
@@ -584,6 +588,33 @@ class SleepGuardService : Service() {
                     audioIrregularity = stagingResult.audioIrregularity,
                     confidence = stagingResult.confidence
                 )
+
+                // Record algorithm deep diagnostic log if enabled
+                if (currentCfg.enableAlgorithmDiagnostics) {
+                    app.sleepRepository.recordAlgorithmDiagnostic(
+                        com.flashalarm.miband.data.db.AlgorithmDiagnosticEntity(
+                            sessionId = sessionId,
+                            timestamp = stagingResult.timestamp,
+                            stage = stagingResult.stage.code,
+                            heartRate = evaluatedHr,
+                            hrSurgePercent = stagingResult.hrSurgePercent,
+                            atoniaScore = stagingResult.atoniaScore,
+                            baseRemProb = stagingResult.baseRemProb,
+                            eogBursts = stagingResult.eogBursts,
+                            eogSignalQuality = stagingResult.eogSignalQuality,
+                            alphaGating = stagingResult.alphaGating,
+                            rawLogitBoost = stagingResult.rawLogitBoost,
+                            effectiveLogitBoost = stagingResult.effectiveLogitBoost,
+                            fusedRemProb = stagingResult.fusedRemProb,
+                            confidenceBoost = stagingResult.confidenceBoost,
+                            effectiveThreshold = stagingResult.effectiveThreshold,
+                            isCueTriggered = stagingResult.isDreamCueTriggered,
+                            isCueEligible = stagingResult.isDreamCueEligible,
+                            consecutiveRemCount = stagingResult.consecutiveRemCount,
+                            triggerReason = stagingResult.triggerReason
+                        )
+                    )
+                }
 
                 // If Lucid Dream Cue triggered!
                 if (stagingResult.isDreamCueTriggered) {

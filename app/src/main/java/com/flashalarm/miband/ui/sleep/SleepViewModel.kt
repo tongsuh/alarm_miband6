@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.flashalarm.miband.FlashAlarmApp
+import com.flashalarm.miband.data.db.AlgorithmDiagnosticEntity
 import com.flashalarm.miband.data.db.DreamCueEntity
 import com.flashalarm.miband.data.db.SleepEpochEntity
 import com.flashalarm.miband.data.db.SleepSessionEntity
@@ -40,6 +41,12 @@ class SleepViewModel(application: Application) : AndroidViewModel(application) {
     val currentCues: StateFlow<List<DreamCueEntity>> = _selectedSessionId
         .flatMapLatest { id ->
             if (id != null) repository.getCuesForSession(id) else flowOf(emptyList())
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val currentDiagnostics: StateFlow<List<AlgorithmDiagnosticEntity>> = _selectedSessionId
+        .flatMapLatest { id ->
+            if (id != null) repository.getDiagnosticsForSession(id) else flowOf(emptyList())
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
