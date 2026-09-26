@@ -222,6 +222,15 @@ fun SleepAnalysisScreen(
 
                 Spacer(modifier = Modifier.height(20.dp))
 
+                // 5. Algorithm Deep Diagnostic Log (Blackbox Traceability)
+                AlgorithmDiagnosticSection(
+                    diagnostics = currentDiagnostics,
+                    session = selectedSession,
+                    onCopyAiReport = onCopyAiReport
+                )
+
+                Spacer(modifier = Modifier.height(20.dp))
+
                 OutlinedButton(
                     onClick = { showDeleteConfirmDialog = true },
                     modifier = Modifier.fillMaxWidth().height(44.dp),
@@ -616,13 +625,6 @@ private fun LucidDreamCueSummaryCard(
                     }
                 }
             }
-
-            // 7. Algorithm Deep Diagnostic Log (Blackbox Traceability)
-            AlgorithmDiagnosticSection(
-                diagnostics = currentDiagnostics,
-                session = selectedSession,
-                onCopyAiReport = onCopyAiReport
-            )
         }
     }
 }
